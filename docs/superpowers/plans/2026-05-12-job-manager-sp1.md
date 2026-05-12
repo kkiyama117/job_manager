@@ -4,7 +4,7 @@
 
 **Goal:** Pure-Rust データ層 (`JobFlow` TOML I/O、並列走査、フィルタ、SLURM tick、CalcView) を実装し、薄い PyO3 経由で Python に公開する。
 
-**Architecture:** Filesystem is single source of truth。`<work_dir>/<flow_uuid>/{flow.toml, status/<job_id>.toml}` を読み書き。SLURM 状態取得は A1 (`slurm-async-runner2`) の `SlurmManager` を経由 (mockable trait `SlurmFacade` を介す)。Python 側は D2 (`gaussian-job-shared2`) の `JobFlow` pyclass を直接渡せないため、SP-1 では **dict 経由で授受**し、Python 側ユーザーが dict から直接フィールドアクセスする運用 (full pyclass interop は将来の bridge spec で)。
+**Architecture:** Filesystem is single source of truth。D2 (`gaussian-job-shared2`) の `JobFlow.work_dir` docstring に従い、各 JobFlow は `<root>/<flow.uuid>/` ディレクトリに保存され、各 Job は `<flow.work_dir>/<JobId>/` 配下に展開される (jobs/ 中間レイヤなし)。Per-Job status は `<flow.work_dir>/<JobId>/.status.toml` (隠しファイル、atomic rename write)。SLURM 状態取得は A1 (`slurm-async-runner2`) の `SlurmManager::query_job_states_batch` (戻り `anyhow::Result<HashMap<u64, JobStatus>>`) を mockable trait `SlurmFacade` でラップ。Python 側は D2 の `JobFlow` pyclass を直接渡せないため、SP-1 では **dict 経由で授受**し (full pyclass interop は将来の bridge spec で)。
 
 **Tech Stack:** Rust 2024, PyO3 0.28 (abi3-py312), tokio 1.0, futures 0.3, async-trait, serde + toml, chrono, uuid v7, pythonize, rstest, pyo3-async-runtimes 0.28, pyo3-stub-gen。Python: 3.12+, pytest, maturin, ruff。
 
@@ -105,7 +105,11 @@ toml = "1.1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.23", features = ["serde", "v7"] }
 
-# upstream crates — Rust-only consumption (no extension-module)
+# upstream crates — Rust-only consumption (no extension-module).
+#
+# Pyclass Single Owner rule: D2/A1 own their pyclass impls. We disable
+# their `pyo3` feature so this crate's cdylib does not duplicate pyclass
+# registrations.
 gaussian_job_shared = { path = "../gaussian-job-shared2", default-features = false }
 slurm_async_runner = { path = "../slurm-async-runner2", default-features = false }
 
@@ -141,10 +145,25 @@ rstest = "0.23"
 tokio = { version = "1.0", features = ["test-util", "macros", "rt-multi-thread"] }
 ```
 
+- [ ] **Step 3.5: D2 が SAR を git URL で参照しているため `[patch]` で path に揃える**
+
+D2 (`gaussian-job-shared2/Cargo.toml`) は SAR を `git = "https://github.com/kkiyama117/slurm-async-runner.git"` で参照している。本 crate も SAR を path 依存している場合、cargo は git 由来と path 由来を **別の crate と判定**してしまい、`JobStatus` や `DependencyType` が「同名だが型不一致」になる。これを防ぐため `[patch]` セクションで git URL → path にリダイレクトする。
+
+`Cargo.toml` の末尾に追加 (`[features]` の後で OK):
+
+```toml
+# Resolve D2's git-sourced slurm_async_runner to our local path so the two
+# crates share a single compiled version. Without this, JobStatus from
+# `gaussian_job_shared::...` and the one we use directly are treated as
+# distinct types by cargo.
+[patch."https://github.com/kkiyama117/slurm-async-runner.git"]
+slurm_async_runner = { path = "../slurm-async-runner2" }
+```
+
 - [ ] **Step 4: Build smoke check**
 
 Run: `cargo build --no-default-features`
-Expected: success (depends on the two sibling crates being buildable; if either fails, fix the path or the toolchain alignment before continuing).
+Expected: success (depends on the two sibling crates being buildable; if either fails, fix the path or the toolchain alignment before continuing). Notably, the `[patch]` line above ensures D2 picks up the same SAR build as we do — if you see `expected JobStatus, found JobStatus` / `expected DependencyType, found DependencyType` errors with two distinct fully-qualified paths, the patch is wrong (likely a missing slash or wrong URL).
 
 - [ ] **Step 5: Commit**
 
@@ -318,7 +337,18 @@ trio to FileNotFoundError and the toml ones to ValueError."
 - [ ] **Step 1: `src/path.rs` 雛形 + 失敗テスト**
 
 ```rust
-//! Path resolution for the <work_dir>/<flow_uuid>/... layout.
+//! Path resolution for the `<root>/<flow_uuid>/<JobId>/...` layout.
+//!
+//! Layout invariant (matches D2's `JobFlow.work_dir` docstring —
+//! "<work_dir>/<JobId>/ is each Job's folder"):
+//!
+//! ```text
+//! <root>/                  <- PathResolver.root
+//! └── <flow_uuid>/         <- = JobFlow.work_dir (set at flow-create time)
+//!     ├── flow.toml        <- JobFlow TOML
+//!     └── <JobId>/         <- = flow.work_dir / <JobId>
+//!         └── .status.toml <- per-Job status (this crate, atomic write)
+//! ```
 //!
 //! Pure: no filesystem I/O. Just deterministic path string composition.
 
@@ -341,6 +371,9 @@ impl PathResolver {
         &self.root
     }
 
+    /// `<root>/<flow_uuid>/`. This is the path that should be stored in
+    /// `JobFlow.work_dir` so that the file-system position and the D2
+    /// field stay in lockstep.
     pub fn flow_dir(&self, flow_uuid: &Uuid) -> PathBuf {
         self.root.join(flow_uuid.to_string())
     }
@@ -349,17 +382,17 @@ impl PathResolver {
         self.flow_dir(flow_uuid).join("flow.toml")
     }
 
-    pub fn status_dir(&self, flow_uuid: &Uuid) -> PathBuf {
-        self.flow_dir(flow_uuid).join("status")
-    }
-
-    pub fn status_file(&self, flow_uuid: &Uuid, job_id: &JobId) -> PathBuf {
-        self.status_dir(flow_uuid)
-            .join(format!("{}.toml", job_id.0))
-    }
-
+    /// `<flow_dir>/<JobId>/` — D2's per-Job folder. SLURM stdout/stderr,
+    /// rendered .bash, input files all live here. No `jobs/` middle layer.
     pub fn job_dir(&self, flow_uuid: &Uuid, job_id: &JobId) -> PathBuf {
-        self.flow_dir(flow_uuid).join("jobs").join(&job_id.0)
+        self.flow_dir(flow_uuid).join(&job_id.0)
+    }
+
+    /// `<job_dir>/.status.toml` — hidden file owned by job-manager.
+    /// Dot-prefix keeps it from colliding with SLURM outputs like
+    /// `slurm-<jobid>.out` and from grammar-layer files like `input.gjf`.
+    pub fn status_file(&self, flow_uuid: &Uuid, job_id: &JobId) -> PathBuf {
+        self.job_dir(flow_uuid, job_id).join(".status.toml")
     }
 }
 
@@ -390,24 +423,24 @@ mod tests {
     }
 
     #[test]
-    fn status_file_uses_job_id_with_toml_suffix() {
-        let r = PathResolver::new("/work");
-        let u = sample_uuid();
-        let j = JobId::from("g16");
-        assert_eq!(
-            r.status_file(&u, &j),
-            PathBuf::from(format!("/work/{u}/status/g16.toml"))
-        );
-    }
-
-    #[test]
-    fn job_dir_nests_under_jobs_directory() {
+    fn job_dir_is_flow_dir_joined_with_job_id_no_jobs_layer() {
         let r = PathResolver::new("/work");
         let u = sample_uuid();
         let j = JobId::from("post");
         assert_eq!(
             r.job_dir(&u, &j),
-            PathBuf::from(format!("/work/{u}/jobs/post"))
+            PathBuf::from(format!("/work/{u}/post"))
+        );
+    }
+
+    #[test]
+    fn status_file_lives_inside_job_dir_as_dot_status_toml() {
+        let r = PathResolver::new("/work");
+        let u = sample_uuid();
+        let j = JobId::from("g16");
+        assert_eq!(
+            r.status_file(&u, &j),
+            PathBuf::from(format!("/work/{u}/g16/.status.toml"))
         );
     }
 }
@@ -625,12 +658,20 @@ git commit -m "feat(flow_io): read/write JobFlow TOML with atomic-rename writes"
 //! Per-Job runtime status (queued/running/done/failed) and its TOML form.
 //!
 //! Status is **not** stored inside `JobFlow` to keep the D2 schema
-//! unchanged. Each Job's status lives in `<flow_uuid>/status/<job_id>.toml`.
+//! unchanged. Each Job's status lives in
+//! `<flow.work_dir>/<JobId>/.status.toml` (dot-prefixed so it does not
+//! collide with SLURM outputs or user-authored job input files).
+//!
+//! `StatusEntry.lifecycle` is the user-visible aggregated state (the
+//! 4-state model). `StatusEntry.slurm_status` keeps the raw A1 (state,
+//! reason) pair so callers can render scheduler-side details (e.g.
+//! `OUT_OF_MEMORY/OutOfMemory`) when explaining a failure.
 
 pub mod io;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use slurm_async_runner::JobStatus;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -649,10 +690,16 @@ impl PerJobStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusEntry {
-    pub status: PerJobStatus,
+    /// User-facing aggregated lifecycle.
+    pub lifecycle: PerJobStatus,
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slurm_jobid: Option<u64>,
+    /// Raw SLURM `(state, reason)` pair last seen for this jobid. None
+    /// until the first successful `tick`. A1 `JobStatus` already implements
+    /// Serialize/Deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slurm_status: Option<JobStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
@@ -660,19 +707,44 @@ pub struct StatusEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use slurm_async_runner::{JobReason, JobState};
 
     #[test]
-    fn status_lowercase_serialization() {
+    fn lifecycle_lowercase_serialization() {
         let s = toml::to_string(&StatusEntry {
-            status: PerJobStatus::Queued,
+            lifecycle: PerJobStatus::Queued,
             updated_at: chrono::Utc::now(),
             slurm_jobid: Some(42),
+            slurm_status: None,
             note: None,
         })
         .unwrap();
-        assert!(s.contains(r#"status = "queued""#), "actual: {s}");
+        assert!(s.contains(r#"lifecycle = "queued""#), "actual: {s}");
         assert!(s.contains("slurm_jobid = 42"));
         assert!(!s.contains("note"), "None should be skipped: {s}");
+        assert!(!s.contains("slurm_status"), "None should be skipped: {s}");
+    }
+
+    #[test]
+    fn slurm_status_roundtrips_through_toml() {
+        let e = StatusEntry {
+            lifecycle: PerJobStatus::Failed,
+            updated_at: chrono::Utc::now(),
+            slurm_jobid: Some(99),
+            slurm_status: Some(JobStatus::with_reason(
+                JobState::OutOfMemory,
+                JobReason::OutOfMemory,
+            )),
+            note: Some("synced: failed-terminal".into()),
+        };
+        let s = toml::to_string(&e).unwrap();
+        let back: StatusEntry = toml::from_str(&s).unwrap();
+        assert_eq!(back.lifecycle, e.lifecycle);
+        assert_eq!(back.slurm_status.as_ref().unwrap().state, JobState::OutOfMemory);
+        assert_eq!(
+            back.slurm_status.as_ref().unwrap().reason,
+            JobReason::OutOfMemory
+        );
     }
 
     #[test]
@@ -735,9 +807,10 @@ mod tests {
 
     fn entry() -> StatusEntry {
         StatusEntry {
-            status: PerJobStatus::Running,
+            lifecycle: PerJobStatus::Running,
             updated_at: Utc::now(),
             slurm_jobid: Some(12345),
+            slurm_status: None,
             note: Some("promoted".to_string()),
         }
     }
@@ -745,11 +818,11 @@ mod tests {
     #[test]
     fn write_then_read_roundtrip() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("status/g16.toml");
+        let path = dir.path().join("g16/.status.toml");
         let e = entry();
         write_status(&path, &e).unwrap();
         let back = read_status(&path).unwrap();
-        assert_eq!(back.status, e.status);
+        assert_eq!(back.lifecycle, e.lifecycle);
         assert_eq!(back.slurm_jobid, e.slurm_jobid);
         assert_eq!(back.note, e.note);
     }
@@ -1010,7 +1083,7 @@ pub fn matches(
     }
     if let Some(want) = f.status {
         match status {
-            Some(e) if e.status == want => {}
+            Some(e) if e.lifecycle == want => {}
             _ => return false,
         }
     }
@@ -1138,9 +1211,10 @@ mod tests {
         };
         assert!(!matches(&f, &id, &j, None, &filt));
         let entry = StatusEntry {
-            status: PerJobStatus::Queued,
+            lifecycle: PerJobStatus::Queued,
             updated_at: Utc::now(),
             slurm_jobid: None,
+            slurm_status: None,
             note: None,
         };
         assert!(matches(&f, &id, &j, Some(&entry), &filt));
@@ -1163,9 +1237,10 @@ mod tests {
     fn slurm_jobid_filter_matches_via_status_entry() {
         let (f, id, j) = make_flow(Uuid::now_v7(), BTreeMap::new());
         let entry = StatusEntry {
-            status: PerJobStatus::Running,
+            lifecycle: PerJobStatus::Running,
             updated_at: Utc::now(),
             slurm_jobid: Some(9999),
+            slurm_status: None,
             note: None,
         };
         let filt = SearchFilter {
@@ -1330,90 +1405,148 @@ git commit -m "feat(slurm_facade): mockable SlurmFacade trait + A1 + Mock impls"
 //! Step 1 of two: a pure decision function. Step 2 (orchestrator) lands
 //! in the next task.
 
-use slurm_async_runner::JobState;
+use slurm_async_runner::{JobState, JobStatus};
 
 use crate::status::PerJobStatus;
+
+/// Extension trait that exposes the `is_terminal() && !Completed`
+/// derived predicate. A1 already publishes `is_terminal()` and
+/// `is_running()`, but not this one — it is specific to this crate's
+/// "Completed != Done" distinction.
+pub trait JobStateExt {
+    fn is_failed_terminal(&self) -> bool;
+}
+
+impl JobStateExt for JobState {
+    fn is_failed_terminal(&self) -> bool {
+        self.is_terminal() && !matches!(self, JobState::Completed)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Decision {
     pub new: Option<PerJobStatus>,
-    pub note: &'static str,
+    pub note: String,
 }
 
-/// Decide the next local status given the previous local status and
-/// the freshly-queried SLURM state. Returns `Decision { new, note }`
+/// Decide the next local lifecycle given the previous one and the
+/// freshly-queried SLURM (state, reason). Returns `Decision { new, note }`
 /// where `new == prev` means no-op (no write needed).
 ///
 /// Invariants (spec §5):
 /// 1. Never writes `Done` (post.bash is the sole authority).
-/// 2. Never overwrites terminal local status.
-/// 3. SLURM failed-terminal → local `Failed` when not already terminal.
-/// 4. SLURM Unknown + non-terminal local → no-op + warning (orphan).
-/// 5. SLURM Completed + non-terminal local → no-op + warning.
-pub fn decide_transition(prev: Option<PerJobStatus>, slurm: Option<JobState>) -> Decision {
+/// 2. Never overwrites terminal local lifecycle.
+/// 3. SLURM `is_failed_terminal()` → local `Failed` when not already terminal.
+/// 4. SLURM `Unknown` + non-terminal local → no-op + warning (orphan).
+/// 5. SLURM `Completed` + non-terminal local → no-op + warning.
+pub fn decide_transition(prev: Option<PerJobStatus>, slurm: Option<JobStatus>) -> Decision {
     use PerJobStatus::*;
-    let no_op = |note| Decision { new: prev, note };
 
-    let Some(s) = slurm else {
-        return no_op("no slurm_jobid");
+    let Some(status) = slurm else {
+        return Decision {
+            new: prev,
+            note: "no slurm_jobid".to_string(),
+        };
     };
+    let state = status.state;
+    let reason = status.reason.as_str();
 
-    match s {
-        JobState::Pending => match prev {
-            Some(Running) => Decision {
-                new: Some(Queued),
-                note: "warning: regressed running->queued",
+    // ---- terminal failure ----
+    if state.is_failed_terminal() {
+        return match prev {
+            Some(Done) => Decision {
+                new: Some(Done),
+                note: format!("warning: SLURM {state} but local done"),
             },
-            _ => Decision {
-                new: Some(Queued),
-                note: "synced: pending",
+            Some(Failed) => Decision {
+                new: Some(Failed),
+                note: format!("unchanged: failed ({state}/{reason})"),
             },
-        },
-        JobState::Running
-        | JobState::Completing
-        | JobState::Suspended
-        | JobState::Configuring
-        | JobState::Resizing
-        | JobState::Signaling
-        | JobState::StageOut
-        | JobState::Stopped
-        | JobState::Requeued
-        | JobState::RequeueFed
-        | JobState::RequeueHold
-        | JobState::ResvDelHold => match prev {
-            Some(Done) | Some(Failed) => no_op("warning: slurm active but local terminal"),
-            Some(Running) => no_op("unchanged: running"),
-            _ => Decision {
-                new: Some(Running),
-                note: "promoted to running",
-            },
-        },
-        JobState::Completed => match prev {
-            Some(Done) => no_op("unchanged: done"),
-            Some(Failed) => no_op("warning: slurm completed but local failed"),
-            _ => no_op("warning: slurm completed but post.bash has not written done"),
-        },
-        // Failed-terminal states (every JobState::is_terminal() variant except Completed).
-        JobState::Failed
-        | JobState::Cancelled
-        | JobState::Timeout
-        | JobState::NodeFail
-        | JobState::OutOfMemory
-        | JobState::Preempted
-        | JobState::BootFail
-        | JobState::Deadline
-        | JobState::Revoked
-        | JobState::SpecialExit => match prev {
-            Some(Done) => no_op("warning: slurm failed but local done"),
-            Some(Failed) => no_op("unchanged: failed"),
             _ => Decision {
                 new: Some(Failed),
-                note: "synced: failed-terminal",
+                note: format!("synced: failed-terminal {state}/{reason}"),
             },
+        };
+    }
+
+    // ---- terminal success ----
+    if matches!(state, JobState::Completed) {
+        return match prev {
+            Some(Done) => Decision {
+                new: Some(Done),
+                note: "unchanged: done".to_string(),
+            },
+            Some(Failed) => Decision {
+                new: Some(Failed),
+                note: "warning: SLURM completed but local failed".to_string(),
+            },
+            _ => Decision {
+                new: prev,
+                note: "warning: SLURM completed but post.bash has not written done".to_string(),
+            },
+        };
+    }
+
+    // ---- alive / progressing on the cluster ----
+    let is_alive = matches!(
+        state,
+        JobState::Running
+            | JobState::Completing
+            | JobState::Resizing
+            | JobState::Signaling
+            | JobState::StageOut
+            | JobState::Suspended
+    );
+    if is_alive {
+        return match prev {
+            Some(Done) | Some(Failed) => Decision {
+                new: prev,
+                note: format!("warning: SLURM {state} but local terminal"),
+            },
+            Some(Running) => Decision {
+                new: prev,
+                note: format!("unchanged: running ({state})"),
+            },
+            _ => Decision {
+                new: Some(Running),
+                note: format!("promoted to running ({state})"),
+            },
+        };
+    }
+
+    // ---- queued / configuring / requeued / hold (not yet executed) ----
+    let is_pending = matches!(
+        state,
+        JobState::Pending
+            | JobState::Configuring
+            | JobState::Requeued
+            | JobState::RequeueFed
+            | JobState::RequeueHold
+            | JobState::ResvDelHold
+            | JobState::Stopped
+    );
+    if is_pending {
+        return match prev {
+            Some(Running) => Decision {
+                new: Some(Queued),
+                note: format!("warning: regressed running->queued ({state})"),
+            },
+            _ => Decision {
+                new: Some(Queued),
+                note: format!("synced: pending ({state}/{reason})"),
+            },
+        };
+    }
+
+    // ---- Unknown (jobid expired / forward-compat) ----
+    match prev {
+        Some(Done) | Some(Failed) => Decision {
+            new: prev,
+            note: "unchanged: jobid expired".to_string(),
         },
-        JobState::Unknown => match prev {
-            Some(Done) | Some(Failed) => no_op("unchanged: jobid expired"),
-            _ => no_op("orphan: jobid not found; manual investigation needed"),
+        _ => Decision {
+            new: prev,
+            note: "orphan: jobid not found; manual investigation needed".to_string(),
         },
     }
 }
@@ -1422,56 +1555,61 @@ pub fn decide_transition(prev: Option<PerJobStatus>, slurm: Option<JobState>) ->
 mod tests {
     use super::*;
     use rstest::rstest;
+    use slurm_async_runner::{JobReason, JobStatus};
+
+    fn js(state: JobState) -> Option<JobStatus> {
+        Some(JobStatus::new(state))
+    }
 
     #[rstest]
     // (prev, slurm, expected_new, note_substring)
     #[case(None, None, None, "no slurm_jobid")]
-    #[case(None, Some(JobState::Pending), Some(PerJobStatus::Queued), "synced")]
+    #[case(None, js(JobState::Pending), Some(PerJobStatus::Queued), "synced")]
     #[case(
         Some(PerJobStatus::Running),
-        Some(JobState::Pending),
+        js(JobState::Pending),
         Some(PerJobStatus::Queued),
         "regressed"
     )]
     #[case(
         Some(PerJobStatus::Queued),
-        Some(JobState::Running),
+        js(JobState::Running),
         Some(PerJobStatus::Running),
         "promoted"
     )]
     #[case(
         Some(PerJobStatus::Done),
-        Some(JobState::Failed),
+        js(JobState::Failed),
         Some(PerJobStatus::Done),
         "warning"
     )]
     #[case(
         Some(PerJobStatus::Running),
-        Some(JobState::Failed),
+        js(JobState::Failed),
         Some(PerJobStatus::Failed),
         "synced"
     )]
     #[case(
         Some(PerJobStatus::Running),
-        Some(JobState::Completed),
+        js(JobState::Completed),
         Some(PerJobStatus::Running),
         "post.bash"
     )]
     #[case(
         Some(PerJobStatus::Done),
-        Some(JobState::Completed),
+        js(JobState::Completed),
         Some(PerJobStatus::Done),
         "unchanged"
     )]
     #[case(
         Some(PerJobStatus::Queued),
-        Some(JobState::Unknown),
+        js(JobState::Unknown),
         Some(PerJobStatus::Queued),
         "orphan"
     )]
     fn transition_matrix(
         #[case] prev: Option<PerJobStatus>,
-        #[case] slurm: Option<JobState>,
+        #[case] slurm: Option<JobStatus>,
         #[case] expected: Option<PerJobStatus>,
         #[case] note_substr: &str,
     ) {
@@ -1483,6 +1621,24 @@ mod tests {
             d.note
         );
     }
+
+    #[test]
+    fn is_failed_terminal_separates_completed_from_others() {
+        assert!(!JobState::Completed.is_failed_terminal());
+        assert!(JobState::Failed.is_failed_terminal());
+        assert!(JobState::OutOfMemory.is_failed_terminal());
+        assert!(!JobState::Running.is_failed_terminal());
+        assert!(!JobState::Pending.is_failed_terminal());
+    }
+
+    #[test]
+    fn failure_reason_is_surfaced_in_note() {
+        let status = JobStatus::with_reason(JobState::OutOfMemory, JobReason::OutOfMemory);
+        let d = decide_transition(Some(PerJobStatus::Running), Some(status));
+        assert_eq!(d.new, Some(PerJobStatus::Failed));
+        assert!(d.note.contains("OUT_OF_MEMORY"), "note: {}", d.note);
+        assert!(d.note.contains("OutOfMemory"), "note: {}", d.note);
+    }
 }
 ```
 
@@ -1491,13 +1647,13 @@ mod tests {
 - [ ] **Step 3: テスト**
 
 Run: `cargo test --lib tick::tests`
-Expected: 9 parametrized cases pass.
+Expected: 9 parametrized cases + 2 unit tests (`is_failed_terminal_separates_completed_from_others`, `failure_reason_is_surfaced_in_note`) all pass.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add src/tick.rs src/lib.rs
-git commit -m "feat(tick): pure decide_transition() with full SLURM state matrix"
+git commit -m "feat(tick): pure decide_transition() over (state, reason) with JobStateExt helper"
 ```
 
 ---
@@ -1516,9 +1672,9 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use gaussian_job_shared::entities::workflow::JobId;
+use slurm_async_runner::JobStatus;
 use uuid::Uuid;
 
-use crate::error::JobManagerError;
 use crate::path::PathResolver;
 use crate::slurm_facade::SlurmFacade;
 use crate::status::{
@@ -1532,7 +1688,10 @@ pub struct TickResult {
     pub job_id: JobId,
     pub previous: Option<PerJobStatus>,
     pub new: Option<PerJobStatus>,
-    pub slurm_state: Option<slurm_async_runner::JobState>,
+    /// Raw SLURM `(state, reason)` last seen for this jobid. None when the
+    /// batch query did not include it (jobid expired) or when the SLURM
+    /// query itself failed.
+    pub slurm_status: Option<JobStatus>,
     pub queried_jobid: Option<u64>,
     pub note: String,
 }
@@ -1540,7 +1699,7 @@ pub struct TickResult {
 /// For each target `(flow_uuid, job_id, slurm_jobid)`:
 /// 1. Batch-query SLURM via `slurm`.
 /// 2. Read local status (None if missing).
-/// 3. Decide transition.
+/// 3. Decide transition over the full `JobStatus`.
 /// 4. Write back if changed.
 pub async fn tick_many(
     targets: &[(Uuid, JobId, u64)],
@@ -1548,10 +1707,7 @@ pub async fn tick_many(
     resolver: &PathResolver,
 ) -> Vec<TickResult> {
     let jobids: Vec<u64> = targets.iter().map(|(_, _, j)| *j).collect();
-    let states: HashMap<u64, slurm_async_runner::JobStatus> = match slurm
-        .query_states_batch(&jobids)
-        .await
-    {
+    let states: HashMap<u64, JobStatus> = match slurm.query_states_batch(&jobids).await {
         Ok(m) => m,
         Err(e) => {
             return targets
@@ -1561,7 +1717,7 @@ pub async fn tick_many(
                     job_id: jid.clone(),
                     previous: None,
                     new: None,
-                    slurm_state: None,
+                    slurm_status: None,
                     queried_jobid: Some(*slurm_jobid),
                     note: format!("slurm batch query failed: {e}"),
                 })
@@ -1573,18 +1729,19 @@ pub async fn tick_many(
     for (flow_uuid, job_id, slurm_jobid) in targets {
         let status_path = resolver.status_file(flow_uuid, job_id);
         let prev_entry = read_status(&status_path).ok();
-        let prev = prev_entry.as_ref().map(|e| e.status);
-        let slurm_state = states.get(slurm_jobid).map(|s| s.state);
+        let prev = prev_entry.as_ref().map(|e| e.lifecycle);
+        let slurm_status = states.get(slurm_jobid).cloned();
 
-        let decision = decide_transition(prev, slurm_state);
-        let mut note: String = decision.note.into();
+        let decision = decide_transition(prev, slurm_status.clone());
+        let mut note = decision.note.clone();
 
         if decision.new != prev && decision.new.is_some() {
             let entry = StatusEntry {
-                status: decision.new.unwrap(),
+                lifecycle: decision.new.unwrap(),
                 updated_at: Utc::now(),
                 slurm_jobid: Some(*slurm_jobid),
-                note: Some(decision.note.to_string()),
+                slurm_status: slurm_status.clone(),
+                note: Some(decision.note.clone()),
             };
             if let Err(e) = write_status(&status_path, &entry) {
                 note = format!("status write failed: {e}");
@@ -1593,7 +1750,7 @@ pub async fn tick_many(
                     job_id: job_id.clone(),
                     previous: prev,
                     new: prev, // rolled back
-                    slurm_state,
+                    slurm_status,
                     queried_jobid: Some(*slurm_jobid),
                     note,
                 });
@@ -1606,12 +1763,11 @@ pub async fn tick_many(
             job_id: job_id.clone(),
             previous: prev,
             new: decision.new,
-            slurm_state,
+            slurm_status,
             queried_jobid: Some(*slurm_jobid),
             note,
         });
     }
-    let _ = JobManagerError::Other(String::new()); // keep import used
     out
 }
 ```
@@ -1631,19 +1787,18 @@ pub async fn tick_many(
         let flow_uuid = Uuid::now_v7();
         let job_id = JobId::from("g16");
 
-        // Seed local status = Queued
+        // Seed local lifecycle = Queued
         let initial = StatusEntry {
-            status: PerJobStatus::Queued,
+            lifecycle: PerJobStatus::Queued,
             updated_at: Utc::now(),
             slurm_jobid: Some(99),
+            slurm_status: None,
             note: None,
         };
         write_status(&resolver.status_file(&flow_uuid, &job_id), &initial).unwrap();
 
         let mut m = HashMap::new();
-        let mut status = JobStatus::default();
-        status.state = JobState::Running;
-        m.insert(99u64, status);
+        m.insert(99u64, JobStatus::new(JobState::Running));
         let slurm = MockSlurmFacade::new(m);
 
         let results = tick_many(
@@ -1656,9 +1811,15 @@ pub async fn tick_many(
         let r = &results[0];
         assert_eq!(r.previous, Some(PerJobStatus::Queued));
         assert_eq!(r.new, Some(PerJobStatus::Running));
+        assert!(r.slurm_status.is_some());
 
         let back = read_status(&resolver.status_file(&flow_uuid, &job_id)).unwrap();
-        assert_eq!(back.status, PerJobStatus::Running);
+        assert_eq!(back.lifecycle, PerJobStatus::Running);
+        // Raw SLURM status is now persisted, not just lifecycle.
+        assert_eq!(
+            back.slurm_status.as_ref().unwrap().state,
+            JobState::Running
+        );
     }
 
     #[tokio::test]
@@ -1668,9 +1829,10 @@ pub async fn tick_many(
         let flow_uuid = Uuid::now_v7();
         let job_id = JobId::from("g16");
         let initial = StatusEntry {
-            status: PerJobStatus::Running,
+            lifecycle: PerJobStatus::Running,
             updated_at: Utc::now(),
             slurm_jobid: Some(77),
+            slurm_status: None,
             note: None,
         };
         write_status(&resolver.status_file(&flow_uuid, &job_id), &initial).unwrap();
@@ -1679,6 +1841,7 @@ pub async fn tick_many(
         let results = tick_many(&[(flow_uuid, job_id.clone(), 77)], &slurm, &resolver).await;
         assert_eq!(results[0].previous, Some(PerJobStatus::Running));
         assert_eq!(results[0].new, Some(PerJobStatus::Running));
+        assert!(results[0].slurm_status.is_none());
     }
 ```
 
@@ -1759,8 +1922,10 @@ impl<'a> CalcView<'a> {
         self.resolver.status_file(&self.flow.uuid, &self.job_id)
     }
 
-    /// List files directly under `job_dir()`. Returns `Ok(vec![])` if the
-    /// dir does not exist. Order: sorted by filename.
+    /// List files directly under `job_dir()`, **excluding dot-prefixed
+    /// hidden files** (so `.status.toml` does not leak into the user-
+    /// facing input/output listing). Returns `Ok(vec![])` if the dir does
+    /// not exist. Order: sorted by filename.
     pub fn files(&self) -> Result<Vec<PathBuf>, JobManagerError> {
         let d = self.job_dir();
         if !d.exists() {
@@ -1774,6 +1939,12 @@ impl<'a> CalcView<'a> {
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| p.is_file())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| !n.starts_with('.'))
+                    .unwrap_or(true)
+            })
             .collect();
         out.sort();
         Ok(out)
@@ -1866,15 +2037,16 @@ mod tests {
         let uuid = Uuid::now_v7();
         let f = single_job_flow(uuid);
         let entry = StatusEntry {
-            status: PerJobStatus::Queued,
+            lifecycle: PerJobStatus::Queued,
             updated_at: Utc::now(),
             slurm_jobid: Some(7),
+            slurm_status: None,
             note: None,
         };
         write_status(&r.status_file(&uuid, &JobId::from("g16")), &entry).unwrap();
         let v = CalcView::new(&f, JobId::from("g16"), &r).unwrap();
         let got = v.status().unwrap();
-        assert_eq!(got.status, PerJobStatus::Queued);
+        assert_eq!(got.lifecycle, PerJobStatus::Queued);
     }
 }
 ```
@@ -2230,7 +2402,10 @@ use crate::slurm_facade::A1SlurmFacade;
 use crate::tick::tick_many as inner_tick_many;
 
 /// Tick a list of `(flow_uuid: str, job_id: str, slurm_jobid: int)` targets.
-/// Returns list of dicts: `{flow_uuid, job_id, previous, new, slurm_state, queried_jobid, note}`.
+/// Returns list of dicts:
+/// `{flow_uuid, job_id, previous, new, slurm_state, slurm_reason, queried_jobid, note}`.
+/// `slurm_state` / `slurm_reason` come from the raw A1 `JobStatus`; both
+/// are `None` when SLURM had no entry for the jobid.
 #[gen_stub_pyfunction]
 #[pyfunction]
 pub fn tick_many<'py>(
@@ -2273,7 +2448,11 @@ pub fn tick_many<'py>(
                 d.set_item("new", r.new.map(|s| format!("{s:?}").to_lowercase()))?;
                 d.set_item(
                     "slurm_state",
-                    r.slurm_state.map(|s| s.as_token().to_string()),
+                    r.slurm_status.as_ref().map(|s| s.state.as_token().to_string()),
+                )?;
+                d.set_item(
+                    "slurm_reason",
+                    r.slurm_status.as_ref().map(|s| s.reason.as_str().to_string()),
                 )?;
                 d.set_item("queried_jobid", r.queried_jobid)?;
                 d.set_item("note", r.note)?;
@@ -2344,9 +2523,18 @@ impl PyCalcView {
     fn status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let entry = read_status(&self.status_path())?;
         let d = pyo3::types::PyDict::new(py);
-        d.set_item("status", format!("{:?}", entry.status).to_lowercase())?;
+        d.set_item("lifecycle", format!("{:?}", entry.lifecycle).to_lowercase())?;
         d.set_item("updated_at", entry.updated_at.to_rfc3339())?;
         d.set_item("slurm_jobid", entry.slurm_jobid)?;
+        // Raw SLURM (state, reason); pythonized so Python sees a dict
+        // with `state = "RUNNING"`/`reason = "Priority"` style values.
+        d.set_item(
+            "slurm_status",
+            match &entry.slurm_status {
+                Some(s) => pythonize::pythonize(py, s)?,
+                None => py.None().into_bound(py),
+            },
+        )?;
         d.set_item("note", entry.note)?;
         Ok(d)
     }
@@ -2592,9 +2780,10 @@ async fn three_targets_tick_independently() {
         write_status(
             &resolver.status_file(uuid, jid),
             &StatusEntry {
-                status: PerJobStatus::Queued,
+                lifecycle: PerJobStatus::Queued,
                 updated_at: Utc::now(),
                 slurm_jobid: Some(*sid),
+                slurm_status: None,
                 note: None,
             },
         )
@@ -2602,12 +2791,8 @@ async fn three_targets_tick_independently() {
     }
 
     let mut responses = HashMap::new();
-    let mut s100 = JobStatus::default();
-    s100.state = JobState::Running;
-    responses.insert(100u64, s100);
-    let mut s101 = JobStatus::default();
-    s101.state = JobState::Failed;
-    responses.insert(101u64, s101);
+    responses.insert(100u64, JobStatus::new(JobState::Running));
+    responses.insert(101u64, JobStatus::new(JobState::Failed));
     // 102 left unset → SLURM Unknown for this jobid
 
     let slurm = MockSlurmFacade::new(responses);
@@ -2619,9 +2804,13 @@ async fn three_targets_tick_independently() {
     let s1 = read_status(&resolver.status_file(&triples[1].0, &triples[1].1)).unwrap();
     let s2 = read_status(&resolver.status_file(&triples[2].0, &triples[2].1)).unwrap();
 
-    assert_eq!(s0.status, PerJobStatus::Running);
-    assert_eq!(s1.status, PerJobStatus::Failed);
-    assert_eq!(s2.status, PerJobStatus::Queued); // unchanged (orphan)
+    assert_eq!(s0.lifecycle, PerJobStatus::Running);
+    assert_eq!(s1.lifecycle, PerJobStatus::Failed);
+    assert_eq!(s2.lifecycle, PerJobStatus::Queued); // unchanged (orphan)
+    // Raw SLURM status is preserved (Running/Failed for s0/s1; None for s2).
+    assert_eq!(s0.slurm_status.as_ref().unwrap().state, JobState::Running);
+    assert_eq!(s1.slurm_status.as_ref().unwrap().state, JobState::Failed);
+    assert!(s2.slurm_status.is_none());
 }
 ```
 
