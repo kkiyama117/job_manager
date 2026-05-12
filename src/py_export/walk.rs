@@ -1,0 +1,48 @@
+use std::path::PathBuf;
+
+use futures::StreamExt;
+use pyo3::prelude::*;
+use pythonize::pythonize;
+
+use crate::walk::walk_flows as inner_walk;
+
+/// Walk `<root>/*` and return a list of `JobFlow` dicts (pythonized).
+/// Errors per-entry are appended as `(None, error_string)` tuples.
+/// SP-2 will replace dicts with real `JobFlow` pyclass via bridge.
+///
+/// Stub generation is owned by the thin wrapper in `py_export::mod.rs` to
+/// avoid duplicate-overload registration in `pyo3-stub-gen`.
+pub fn walk_flows<'py>(py: Python<'py>, root: PathBuf) -> PyResult<Bound<'py, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let stream = inner_walk(&root);
+        let mut stream = std::pin::pin!(stream);
+        let mut items: Vec<Result<serde_json::Value, String>> = Vec::new();
+        while let Some(r) = stream.next().await {
+            match r {
+                Ok(flow) => match serde_json::to_value(&flow) {
+                    Ok(v) => items.push(Ok(v)),
+                    Err(e) => items.push(Err(format!("json: {e}"))),
+                },
+                Err(e) => items.push(Err(e.to_string())),
+            }
+        }
+        Python::attach(|py| {
+            let list = pyo3::types::PyList::empty(py);
+            for item in items {
+                match item {
+                    Ok(v) => {
+                        let pyv = pythonize(py, &v).map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())
+                        })?;
+                        list.append(pyv)?;
+                    }
+                    Err(e) => {
+                        let pair = (py.None(), e);
+                        list.append(pair)?;
+                    }
+                }
+            }
+            Ok::<Py<PyAny>, PyErr>(list.into_any().unbind())
+        })
+    })
+}

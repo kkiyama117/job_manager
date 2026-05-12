@@ -80,25 +80,36 @@ SP-1 (データ層, 本spec)   ←── SP-2 (grammar)   ←── SP-3 (submit
 
 ## 3. ディレクトリレイアウト (永続データ)
 
+D2 (`gaussian-job-shared2`) の `JobFlow.work_dir` docstring に従う:
+
+> Working directory: `<work_dir>/<JobId>/` is each Job's folder.
+> TaskManager creates these and writes the rendered `.bash` etc.
+
+つまり **`flow.work_dir` の直下に `<JobId>/` サブディレクトリ**が並ぶ。`jobs/` 中間レイヤは入れない。
+
 ```
-<work_dir>/
-├── <flow_uuid_A>/
+<root>/                            # PathResolver.root (job-manager の検索ルート)
+├── <flow_uuid_A>/                 # = JobFlow.work_dir (規約: root / flow.uuid.to_string())
 │   ├── flow.toml                  # JobFlow (D2 スキーマ、atomic write)
-│   ├── status/                    # per-Job runtime status
-│   │   ├── g16.toml               # PerJobStatusEntry for JobId="g16"
-│   │   └── post.toml
-│   ├── jobs/                      # per-Job 作業ディレクトリ (SP-3 で書き込む側、SP-1 は読み only)
-│   │   ├── g16/
-│   │   │   ├── input.gjf          # SP-3 担当
-│   │   │   ├── batch_g16.bash     # SP-3 担当
-│   │   │   └── slurm-<jobid>.out  # SLURM 直書き
-│   │   └── post/
-│   └── derived/                   # 解析結果 (将来; SP-1 は触れない)
+│   ├── g16/                       # = flow.work_dir / "g16" (D2 規約)
+│   │   ├── .status.toml           # per-Job runtime status (SP-1 atomic write)
+│   │   ├── input.gjf              # SP-3 担当
+│   │   ├── batch_g16.bash         # SP-3 担当
+│   │   └── slurm-<jobid>.out      # SLURM 直書き
+│   ├── post/
+│   │   ├── .status.toml
+│   │   └── ...
+│   └── derived/                   # 解析結果 (将来; SP-1 は触れない、JobId="derived" との衝突は禁止規約)
 ├── <flow_uuid_B>/
 │   └── ...
 ```
 
-**判断: `flow.toml` 単一ファイルに JobFlow 全体を持つ。** 旧 D1 の per-uuid `metadata.toml` 分散ではなく、JobFlow 単位で 1 ファイル。理由: 1 つの実験 = 1 つの JobFlow という新スキーマの単位を踏襲、TOML パース回数 = #experiments で済む。
+### 設計判断 (Layout)
+
+1. **`flow.work_dir == <root>/<flow.uuid>/`** を job-manager 側の規約とする。PathResolver の `flow_dir(uuid)` がこの不変条件を保つ。これによりファイルシステム位置と D2 の `flow.work_dir` 値が常に一致する。
+2. **`flow.toml` 単一ファイルに JobFlow 全体を持つ。** 旧 D1 の per-uuid `metadata.toml` 分散ではなく、JobFlow 単位で 1 ファイル。TOML パース回数 = #JobFlows で済む。
+3. **status は Job 直下の隠しファイル `<flow.work_dir>/<JobId>/.status.toml`。** 別ディレクトリの `status/` レイヤを設けると `JobId="status"` との衝突可能性があるため、Job dir 内側にネストしてスコープを限定する。
+4. **`derived/` は予約名。** ユーザーが `JobId="derived"` を選ぶと衝突するため、grammar 層 (SP-2) で予約名チェックする (本 spec の範囲外、TODO リスト化)。
 
 ---
 
@@ -133,32 +144,61 @@ job_manager/
 
 ### 4.1 主要型のシグネチャ
 
+#### 上流からの import
+
+```rust
+use gaussian_job_shared::entities::workflow::{
+    JobFlow, Job, JobSpec, JobEdge, JobId, Program, CalcType,
+};
+use slurm_async_runner::{
+    JobState, JobStatus, JobReason,            // re-export at crate root
+    SlurmManager, SlurmCmd,                    // batch query manager
+};
+```
+
+#### 型定義
+
 ```rust
 // path.rs
+//
+// 規約: 各 JobFlow のディレクトリ = root / <flow.uuid>。
+// そのまま JobFlow.work_dir に書き戻されるので、ファイル位置と
+// JobFlow 内の `work_dir` 値は常に一致する (PathResolver 経由で保つ)。
 pub struct PathResolver { root: PathBuf }
 impl PathResolver {
     pub fn new(root: PathBuf) -> Self;
-    pub fn flow_dir(&self, flow_uuid: &Uuid) -> PathBuf;
-    pub fn flow_toml(&self, flow_uuid: &Uuid) -> PathBuf;
-    pub fn status_dir(&self, flow_uuid: &Uuid) -> PathBuf;
-    pub fn status_file(&self, flow_uuid: &Uuid, job_id: &JobId) -> PathBuf;
+    pub fn root(&self) -> &Path;
+    pub fn flow_dir(&self, flow_uuid: &Uuid) -> PathBuf;        // = root / uuid.to_string()
+    pub fn flow_toml(&self, flow_uuid: &Uuid) -> PathBuf;       // = flow_dir / "flow.toml"
     pub fn job_dir(&self, flow_uuid: &Uuid, job_id: &JobId) -> PathBuf;
+                                                                 // = flow_dir / job_id.to_string()
+    pub fn status_file(&self, flow_uuid: &Uuid, job_id: &JobId) -> PathBuf;
+                                                                 // = job_dir / ".status.toml"
 }
 
 // status/mod.rs
+//
+// PerJobStatus は user-visible な 4 状態へ集約。SLURM の生 (state, reason) は
+// 同じ StatusEntry に `slurm_status: Option<JobStatus>` として保持し、UI / debug
+// から取り出せるようにする (失敗理由の表示等)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PerJobStatus { Queued, Running, Done, Failed }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusEntry {
-    pub status: PerJobStatus,
+    pub lifecycle: PerJobStatus,
     pub updated_at: DateTime<Utc>,
     pub slurm_jobid: Option<u64>,
+    /// A1 から取得した (state, reason)。tick で書き換えられる。
+    /// `JobStatus` 自体は A1 の `slurm_async_runner::entities::slurm::status::JobStatus`。
+    pub slurm_status: Option<JobStatus>,
     pub note: Option<String>,
 }
 
 // flow_io.rs
+//
+// JobFlow 自体は D2 が所有 (pyclass single owner)。job-manager は serde I/O のみ。
 pub fn read_flow(path: &Path) -> Result<JobFlow, JobManagerError>;
 pub fn write_flow(path: &Path, flow: &JobFlow) -> Result<(), JobManagerError>; // atomic rename
 
@@ -167,6 +207,11 @@ pub fn walk_flows(root: &Path)
     -> impl Stream<Item = Result<JobFlow, JobManagerError>>;
 
 // filter.rs
+//
+// `tags` は D2 の `JobFlow.tags: BTreeMap<String,String>` に揃える。
+// `status` フィルタは集約された PerJobStatus、`slurm_state` フィルタは
+// (SP-1 では不採用、SP-2 以降で追加余地) — リッチ JobStatus 全体での絞り込みは
+// 必要性が出てから拡張する。
 #[derive(Debug, Clone, Default)]
 pub struct SearchFilter {
     pub program: Option<Program>,
@@ -183,18 +228,20 @@ pub fn matches(flow: &JobFlow, job_id: &JobId, status: Option<&StatusEntry>, f: 
 
 // slurm_facade.rs — trait for mockability
 //
-// 型注: A1 の `SlurmManager::query_job_states_batch` の戻り型 `HashMap<u64, JobStatus>`
-// をそのまま透過する。`JobStatus` は `(state: JobState, reason: JobReason)` のペア。
-// tick.rs の `decide_transition` は `JobState` 単体を見るだけなので、呼び出し側で
-// `.state` を抽出して渡す。
+// 設計上のメモ:
+// - A1 の `SlurmManager::query_job_states_batch(&[u64]) -> anyhow::Result<HashMap<u64, JobStatus>>`
+//   を adapter で包んで `JobManagerError::Slurm(String)` に正規化する。
+// - tick.rs の `decide_transition` は `JobState` 単体で十分なので、呼び側で
+//   `JobStatus.state` を取り出して渡す。`JobStatus.reason` は `StatusEntry.slurm_status`
+//   に保存され、UI/debug で表示される。
+// - `SlurmManager` は `Clone + Default` で軽量なので `Arc` は必須ではないが、
+//   Python から複数の facade を構築するシナリオで参照を共有しやすいよう保持する。
 #[async_trait::async_trait]
 pub trait SlurmFacade: Send + Sync {
     async fn query_states_batch(&self, jobids: &[u64])
         -> Result<HashMap<u64, JobStatus>, JobManagerError>;
 }
 
-// concrete impl — A1 の低レベル SlurmManager を保持
-// (SbatchManager は spawn/cancel 中心、状態クエリは SlurmManager の仕事)
 pub struct A1SlurmFacade { manager: Arc<SlurmManager> }
 
 // tick.rs
@@ -204,7 +251,8 @@ pub struct TickResult {
     pub job_id: JobId,
     pub previous: Option<PerJobStatus>,
     pub new: Option<PerJobStatus>,
-    pub slurm_state: Option<JobState>,
+    /// SLURM から取得した最新 (state, reason)。`note` 生成にも使う。
+    pub slurm_status: Option<JobStatus>,
     pub queried_jobid: Option<u64>,
     pub note: String,
 }
@@ -222,11 +270,11 @@ pub struct CalcView<'a> {
     resolver: &'a PathResolver,
 }
 impl<'a> CalcView<'a> {
-    pub fn job(&self) -> &'a Job;
-    pub fn status(&self) -> Result<StatusEntry, JobManagerError>;
-    pub fn input_files(&self) -> Result<Vec<PathBuf>, JobManagerError>;
-    pub fn output_files(&self) -> Result<Vec<PathBuf>, JobManagerError>;
-    pub fn job_dir(&self) -> PathBuf;
+    pub fn job(&self) -> &'a Job;                                       // BTreeMap lookup
+    pub fn status(&self) -> Result<StatusEntry, JobManagerError>;        // .status.toml read
+    pub fn input_files(&self) -> Result<Vec<PathBuf>, JobManagerError>;  // job_dir 内 *.gjf
+    pub fn output_files(&self) -> Result<Vec<PathBuf>, JobManagerError>; // job_dir 内 *.log / *.out
+    pub fn job_dir(&self) -> PathBuf;                                    // PathResolver 経由
 }
 ```
 
@@ -262,53 +310,115 @@ pub enum JobManagerError {
 
 ## 5. Status 状態遷移ロジック (tick)
 
-Python 版 `_decide_transition` を踏襲しつつ簡素化。invariants:
+Python 版 `_decide_transition` を踏襲しつつ、A1 が公開しているヘルパで分類を簡素化する。
 
-1. **`done` を tick が書くことはない。** `Done` は SP-3 で post-script が書く想定 (ステータス書き込みの唯一の権威)。
-2. **terminal 状態は上書きしない。** prev ∈ {Done, Failed} の時は遷移しない。
-3. **SLURM 側の失敗 (FAILED / CANCELLED / TIMEOUT / NODE_FAIL / OUT_OF_MEMORY / PREEMPTED / BOOT_FAIL / DEADLINE) で local 非 terminal なら Failed に遷移。**
-4. **SLURM UNKNOWN (jobid expire) かつ local 非 terminal は warning + no-op** (orphan)。
-5. **SLURM COMPLETED かつ local Queued/Running は no-op + warning** (post.bash がまだ done を書いていない過渡状態の可能性)。
+### 5.1 不変条件 (invariants)
 
-擬似コード:
+1. **`Done` を tick が書くことはない。** `Done` は SP-3 で post-script が書く想定 (ステータス書き込みの唯一の権威)。
+2. **terminal 状態は上書きしない。** prev ∈ {Done, Failed} の時、tick は status を遷移させない (warning note のみ更新)。
+3. **SLURM 側の失敗 terminal (= `is_terminal() && !Completed`) で local 非 terminal なら Failed に遷移。**
+4. **SLURM `Completed` かつ local Queued/Running は no-op + warning** (post.bash がまだ done を書いていない過渡状態の可能性)。
+5. **SLURM `Unknown` (jobid expire) かつ local 非 terminal は warning + no-op** (orphan)。
+
+### 5.2 A1 のヘルパを使う
+
+A1 `JobState` には以下のヘルパが定義されている (`slurm-async-runner2/src/entities/slurm/status.rs`):
+
+- `is_running()` → `Running` のみ true。
+- `is_terminal()` → `Completed`, `BootFail`, `Cancelled`, `Deadline`, `Failed`, `NodeFail`, `OutOfMemory`, `Preempted`, `Revoked`, `SpecialExit`, `Timeout`。
+
+job-manager 側で 1 つだけ拡張 trait を追加する:
 
 ```rust
-fn decide_transition(prev: Option<PerJobStatus>, slurm: Option<JobState>)
-    -> (Option<PerJobStatus>, &'static str)
-{
-    use PerJobStatus::*;
-    let prev = prev;
-    match slurm {
-        None => (prev, "no slurm_jobid"),
-        Some(JobState::Pending) => match prev {
-            Some(Running) => (Some(Queued), "warning: regressed running→queued"),
-            _ => (Some(Queued), "synced: pending"),
-        },
-        Some(JobState::Running) | Some(JobState::Completing) | Some(JobState::Suspended) => {
-            match prev {
-                Some(Done) | Some(Failed) => (prev, "warning: SLURM running but local terminal"),
-                _ => (Some(Running), "promoted to running"),
-            }
-        },
-        Some(JobState::Completed) => match prev {
-            Some(Done) => (Some(Done), "unchanged"),
-            Some(Failed) => (Some(Failed), "warning: SLURM completed but local failed"),
-            _ => (prev, "warning: SLURM completed but post.bash didn't write done"),
-        },
-        Some(s) if s.is_failed_terminal() => match prev {
-            Some(Done) => (Some(Done), "warning: SLURM failed but local done"),
-            _ => (Some(Failed), "synced: failed-terminal"),
-        },
-        Some(JobState::Unknown) => match prev {
-            Some(Done) | Some(Failed) => (prev, "unchanged: jobid expired"),
-            _ => (prev, "orphan: manual investigation needed"),
-        },
-        _ => (prev, "unhandled slurm state"),
+pub trait JobStateExt {
+    /// terminal かつ Completed ではない (= 失敗終端) の判定。
+    fn is_failed_terminal(&self) -> bool;
+}
+
+impl JobStateExt for JobState {
+    fn is_failed_terminal(&self) -> bool {
+        self.is_terminal() && !matches!(self, JobState::Completed)
     }
 }
 ```
 
-`JobState::is_failed_terminal()` ヘルパは A1 側で持っていない場合、本 crate で extension trait として定義する。
+### 5.3 遷移擬似コード
+
+```rust
+fn decide_transition(
+    prev: Option<PerJobStatus>,
+    slurm: Option<JobStatus>,                                   // 生の (state, reason) を受け取る
+) -> (Option<PerJobStatus>, String) {
+    use PerJobStatus::*;
+    let Some(status) = slurm else {
+        return (prev, "no slurm_jobid".to_string());
+    };
+    let state = status.state;
+    let reason = status.reason.as_str();                        // log message 用
+
+    // ---- terminal failure ----
+    if state.is_failed_terminal() {
+        return match prev {
+            Some(Done) => (Some(Done), format!("warning: SLURM {state} but local done")),
+            _ => (Some(Failed), format!("synced: failed-terminal {state} ({reason})")),
+        };
+    }
+
+    // ---- terminal success (Completed) ----
+    if matches!(state, JobState::Completed) {
+        return match prev {
+            Some(Done) => (Some(Done), "unchanged".to_string()),
+            Some(Failed) => (Some(Failed), "warning: SLURM completed but local failed".to_string()),
+            _ => (prev, "warning: SLURM completed but post.bash didn't write done".to_string()),
+        };
+    }
+
+    // ---- alive (Running / Completing / Resizing / Signaling / StageOut / Suspended) ----
+    // A1 の is_running() は Running のみだが、scheduler 視点で "compute を使っている/開始可能"
+    // をまとめたい。Running 同等にまとめる variant を明示列挙する。
+    let is_alive = matches!(
+        state,
+        JobState::Running
+            | JobState::Completing
+            | JobState::Resizing
+            | JobState::Signaling
+            | JobState::StageOut
+            | JobState::Suspended
+    );
+    if is_alive {
+        return match prev {
+            Some(Done) | Some(Failed) => (prev, format!("warning: SLURM {state} but local terminal")),
+            _ => (Some(Running), format!("promoted to running ({state})")),
+        };
+    }
+
+    // ---- queued / configuring / requeued / hold (= まだ実行されていない) ----
+    let is_pending = matches!(
+        state,
+        JobState::Pending
+            | JobState::Configuring
+            | JobState::Requeued
+            | JobState::RequeueFed
+            | JobState::RequeueHold
+            | JobState::ResvDelHold
+            | JobState::Stopped
+    );
+    if is_pending {
+        return match prev {
+            Some(Running) => (Some(Queued), format!("warning: regressed running→queued ({state})")),
+            _ => (Some(Queued), format!("synced: pending ({state}, {reason})")),
+        };
+    }
+
+    // ---- Unknown (jobid expire / forward-compat) ----
+    match prev {
+        Some(Done) | Some(Failed) => (prev, "unchanged: jobid expired".to_string()),
+        _ => (prev, "orphan: manual investigation needed".to_string()),
+    }
+}
+```
+
+この実装は A1 の `JobState` 24 variant + `Unknown` を全て if/match で網羅する (cargo clippy `non_exhaustive_omitted_patterns` で確認可能)。
 
 ---
 
@@ -401,11 +511,13 @@ print(view.input_files())
 
 | 項目 | リスク | 対応 |
 |---|---|---|
-| D2 の path 依存 | `gaussian-job-shared2` ディレクトリ名変更 (`2` サフィックス) | `Cargo.toml` で local path 指定、いずれ git 依存に切り替え |
-| A1 の `JobState` enum の網羅性 | A1 が未対応の SLURM state | `_ => (prev, "unhandled")` で安全側 fallthrough |
-| status を別ファイルにする選択 | 書き込み race (`flow.toml` 書き換えと同時) | SP-1 では `flow.toml` は読み only、status はタイムスタンプ + atomic rename で衝突回避 |
-| `walk_flows` の並列度 | ファイルシステムによってはディスク IO bound | env var override + ベンチ後調整 |
+| D2 が SAR を git URL で参照 | path-dep を素朴に書くと、D2 の SAR (git) と job-manager の SAR (path) が **別 crate と認識される** → 型不一致 (`DependencyType`, `JobStatus` 等が `expected X, found X` で衝突) | job-manager の `Cargo.toml` に `[patch."https://github.com/kkiyama117/slurm-async-runner.git"]` で `slurm_async_runner = { path = "../slurm-async-runner2" }` を上書き |
+| ディレクトリ名 `*-2` サフィックス | パッケージ昇格時にディレクトリ rename される可能性 | `Cargo.toml` の path を 1 箇所に集約 (ワークスペース化は本 spec 範囲外) |
+| A1 の `JobState` enum の前向き互換 | A1 が将来 variant を追加した場合 | `decide_transition` は明示分類後の fallthrough を `Unknown` に倒す。clippy `non_exhaustive_omitted_patterns` を CI で有効化 |
+| status を Job dir 内側に置く選択 | `JobId="derived"` などの予約名と衝突可能性 | SP-2 (grammar) で予約名 (`derived`, `flow.toml`) をブロック。`.status.toml` は dot 接頭辞で SLURM 出力 (`slurm-*.out` 等) と区別 |
+| `walk_flows` の並列度 | ファイルシステムによってはディスク IO bound | `JOB_MANAGER_PARALLELISM` env で override + ベンチ後調整 |
 | pyo3-async-runtimes 統合 | A1 と同じ tokio ランタイム共有要 | A1 と同様の `[features]` 設定を踏襲 (slurm-async-runner2 を参照) |
+| D2 を経由した pyclass 利用 | D2 が pyclass を所有 (single-owner ルール)。`from gaussian_job_shared import JobFlow` は D2 の wheel 経由でのみ動く | SP-1 の Python テストでは D2 wheel を `pip install -e ../gaussian-job-shared2` でロード前提 (pyproject に dev-dep として記載) |
 
 ---
 
