@@ -1,0 +1,55 @@
+[project]
+name = "job_manager"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "kkiyama117", email = "k.kiyama117@gmail.com" }]
+classifiers = [
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+  "Programming Language :: Rust",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+tests = ["pytest", "ruff"]
+
+[dependency-groups]
+dev = [
+  "maturin>=1.13,<2.0",
+  "pytest",
+  "ruff",
+]
+
+[build-system]
+requires = ["maturin>=1.13,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "job_manager._job_manager_core"
+profile = "dev"
+python-packages = ["job_manager"]
+python-source = "python"
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint.per-file-ignores]
+# pyo3-stub-gen output uses forward references in default-value expressions
+# that ruff flags as F821. The file already opts out of F401/F403/F405/E501.
+"**/*.pyi" = ["F821"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["job-manager"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.uv]
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "src/**/*.rs" },
+  { file = "Cargo.toml" },
+  { file = "Cargo.lock" },
+]

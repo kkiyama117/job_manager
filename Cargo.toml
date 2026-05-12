@@ -1,0 +1,99 @@
+[package]
+name = "job_manager"
+version = "0.1.0"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+# "cdylib" is necessary to produce a shared library for Python to import from.
+# "rlib" is required so the `stub_gen` binary can link against this crate.
+# Python-facing module path is controlled separately via
+# `[tool.maturin] module-name` in `pyproject.toml`.
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "job_manager"
+
+[[bin]]
+name = "stub_gen"
+required-features = ["stub_gen"]
+
+[dependencies]
+# Simplified error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Logging and tracing
+log = "0.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Asynchronous runtime — kept minimal here. Add features (process, fs,
+# io-util, time, etc.) on a per-need basis to keep build times low.
+tokio = { version = "1.0", features = [
+  "macros",
+  "rt-multi-thread",
+  "sync",
+] }
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+##### OPTIONAL DEPS #####
+# PYO3 stack. Mirrors the slurm_async_runner layout: every pyo3-related
+# crate is gated behind the `pyo3` cargo feature so the pure-Rust build
+# stays slim and downstream rlib consumers don't pull libpython.
+pyo3 = { version = "0.28", features = [
+  "abi3-py312",
+  # Connection to other useful crates
+  "anyhow",
+  "experimental-inspect",
+  # NOTE: "extension-module" is intentionally NOT enabled here. Enable it
+  # per-package via `[tool.maturin] features = ["pyo3/extension-module"]`
+  # in this package's pyproject.toml. Keeping it out of the default
+  # workspace feature set lets the `stub_gen` binary link against
+  # libpython.
+  # NOTE: "auto-initialize" is intentionally NOT enabled. It conflicts
+  # with the statically-linked Python that maturin's manylinux build
+  # images ship, producing the build-script error "auto-initialize
+  # feature is enabled, but your python installation only supports
+  # embedding the Python interpreter statically". stub_gen does not need
+  # it (abi3 dynamic linking via libpython3.so is sufficient at run time).
+  "nightly",
+  "serde",
+], optional = true }
+pyo3-async-runtimes = { version = "0.28", features = [
+  "attributes",
+  "tokio-runtime",
+], optional = true }
+pyo3-log = { version = "0.13", optional = true }
+pythonize = { version = "0.28", optional = true }
+
+# STUB_GEN
+pyo3-stub-gen = { git = "https://github.com/Jij-Inc/pyo3-stub-gen", branch = "main", default-features = false, features = [
+  "infer_signature",
+], optional = true }
+
+[features]
+default = ["pyo3", "stub_gen"]
+
+# Canonical-wheel build: enables BOTH the pyclass impls and the
+# pymodule entry. This is the only path under which job_manager's
+# pyclass code is compiled.
+#
+# ARCHITECTURE RULE — Pyclass Single Owner:
+# Downstream crates MUST NOT enable this feature. Use
+# `default-features = false` to consume Rust types only. Each
+# pyclass type has exactly one owner cdylib in the dependency
+# graph; duplicating pyclass impls into multiple cdylibs produces
+# distinct Python type objects with identical __module__ strings,
+# breaking isinstance checks.
+pyo3 = [
+  "dep:pyo3",
+  "pyo3-async-runtimes",
+  "pyo3-log",
+  "pythonize",
+  "pyo3-stub-gen",
+]
+
+stub_gen = ["pyo3"]

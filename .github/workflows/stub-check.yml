@@ -1,0 +1,47 @@
+# Verify that pyo3-stub-gen output committed to the repo is up to date.
+#
+# Scope: runs ONLY on pushes to the `main` branch and on tag pushes
+# (typically releases). PR validation is intentionally not wired here —
+# stub freshness on feature branches is enforced by the local
+# pre-commit hook (.pre-commit-config.yaml → pyo3-stub-gen).
+#
+# Failure mode: if regenerated .pyi differs from the committed tree, the
+# `git diff --exit-code` step fails and prints the drift, blocking the
+# release/merge until the contributor regenerates locally and commits.
+name: stub-check
+
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-stubs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        # rust-toolchain.toml selects nightly; this action respects it.
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Regenerate pyo3-stub-gen output
+        run: cargo run --quiet --bin stub_gen
+
+      - name: Verify .pyi files are committed and unchanged
+        run: |
+          if ! git diff --exit-code -- 'python/**/*.pyi'; then
+            echo "::error::pyo3-stub-gen output is stale. Run \`cargo run --bin stub_gen\` locally and commit the regenerated .pyi files." >&2
+            exit 1
+          fi
