@@ -3,6 +3,9 @@
 use pyo3::prelude::*;
 
 pub mod error;
+pub mod filter;
+pub mod path;
+pub mod status;
 
 pyo3_stub_gen::define_stub_info_gatherer!(stub_info);
 
