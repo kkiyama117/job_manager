@@ -1,146 +1,240 @@
-# job-manager SP-2 (grammar) 設計 v4
+# job-manager SP-2 (plan + helpers) 設計 v5
 
-- **Date**: 2026-05-12 (v1→v4 改訂)
+- **Date**: 2026-05-12 (v1→v5 改訂)
 - **Status**: Draft (brainstorming 完了、レビュー待ち)
-- **Targets**: `crate::grammar::*` + `crate::plan::*` (Rust) / `job_manager._job_manager_core.grammar` (Python)
-- **Subproject**: SP-2 of 3 — grammar (`experiment.toml` → `(JobFlow, ExperimentPlan)`)
+- **Targets**: `crate::plan::*` + `crate::jobid::*` (Rust) / `job_manager._job_manager_core.{plan, jobid}` (Python)
+- **Subproject**: SP-2 of 3 — per-job params sidecar + JobId helpers
 - **References**:
-  - SP-1 spec: `docs/superpowers/specs/2026-05-12-job-manager-sp1-design.md` (データ層、FS レイアウト確立)
-  - Python リファレンス: `../../../gaussian-experiment-manager/src/gaussian_experiment_manager/grammar/`
-  - 上流 (D2): `../../../gaussian-job-shared2/` — **work_dir フィールドのみ撤廃** (本 spec で要 D2 PR)
-  - 上流 (A1): `../../../slurm-async-runner2/` (`DependencyType`, `SlurmJobConfig` — 不可侵)
+  - SP-1 spec: `docs/superpowers/specs/2026-05-12-job-manager-sp1-design.md`
+  - 上流 (D2): `../../../gaussian-job-shared2/` — **`JobFlow.work_dir` フィールドのみ撤廃** (本 spec で要 D2 PR)
+  - 上流 (A1): `../../../slurm-async-runner2/` — 不可侵
 
 ---
 
-## v4 改訂サマリ
+## v5 改訂サマリ — **experiment.toml DSL 撤廃**
 
-ユーザー訂正の整理 (v1→v4):
+ユーザー問いかけ「WHY NOT using experiment.toml? is it really needed?」を受け、grammar DSL の必要性を再評価:
 
-1. **v2 で D2 newtype 撤廃を提案 → v3 で取消** — newtype は shared 定義として保持し、import して使う
-2. **v4: フィールド単位での要否判断**
-   - 「自前構造を使わない」= shared 型を import すること、ただし **shared 側の不要なフィールドは撤廃可能**
-   - `JobFlow.work_dir` は `<root>/<uuid>/` で導出可能なので撤廃する
-   - 他のフィールド (`uuid`/`created_at`/`tags`/`jobs`/`spec.*`/`parents` 等) は run + search で必須なので保持
+**結論:** Rust 側に DSL を実装しない。`experiment.toml` 形式は SP-2 のスコープから外す。
 
-D2 フィールド監査結果:
+### 理由
 
-| Struct | Field | 判定 | 理由 |
-|---|---|---|---|
-| `JobFlow` | `uuid` | 保持 | identity / search key |
-| `JobFlow` | `created_at` | 保持 | 時系列ソート |
-| `JobFlow` | `work_dir` | **撤廃** | `<root>/<uuid>/` で導出可、`mv` で drift リスク |
-| `JobFlow` | `tags` | 保持 | search (`tags["calc_type"]` 含む) |
-| `JobFlow` | `jobs` | 保持 | DAG 本体 |
-| `Job.spec` | flatten | 保持 | run の全情報 |
-| `Job.parents` | — | 保持 | 依存ワイヤリング |
-| `JobSpec.program` | — | 保持 | search by program |
-| `JobSpec.config` | — | 保持 | sbatch directives (A1 不可侵) |
-| `JobSpec.body` | — | 保持 | bash 本体 |
-| `JobEdge.from` | — | 保持 | dep target |
-| `JobEdge.kind` | — | 保持 | dep kind (A1 型) |
+| DSL 機能 | Python 代替 | コメント |
+|---|---|---|
+| `[[axis]]` sweep 軸宣言 | Python list + `itertools.product` | Python の方が表現力豊か (任意の iterable / 条件分岐 / 計算済み値) |
+| `${axis.field}` placeholder | Python f-string | `f"# {method['route']}/6-31G*"` — 直感的、型ロスなし |
+| `parents = [{fanout=true}]` | Python で `JobEdge` を直接構築 | parent 解決ロジックを Python で書く方が透明 |
+| `[[step]] sweep=[...]` | `for c, m in product(compounds, methods)` | Python ループの方が flexible |
+| Legacy 形状検出 | (不要) | DSL が無いので legacy も無い |
 
-注: `JobFlow.calc_type` というフィールドは現行 D2 に **存在しない**。`CalcType` は newtype として定義されているが、どの struct のフィールドにも使われておらず、`tags["calc_type"]` (String) として運用されている。`CalcType` newtype 自体は保持 (downstream の typed 利用余地、SP-2 内では `FlowMeta.calc_type: Option<CalcType>` で利用)。
+### 削減効果
+
+| 項目 | v4 (DSL あり) | v5 (DSL なし) |
+|---|---|---|
+| Rust モジュール | `grammar/{source, reader, placeholder, sweep, jobid, chain, build, mod}` | `jobid.rs` のみ |
+| 行数 (推定) | 1500+ 行 (test 含まず) | 250 行 |
+| エラーバリアント | 28 種 (Grammar*/Legacy/Placeholder/Dag) | 4 種 (JobId* のみ) |
+| Python API | `expand_experiment` + helpers | `validate_*` / `build_job_id` / `parse_job_id` |
+| fixture | 11 種 (`tests/fixtures/experiment/*.toml`) | 0 種 (struct round-trip は in-memory) |
+| 学習コスト | DSL 仕様を覚える | Python を書く (既知) |
+
+### v4 から残す決定
+
+- D2 newtype は保持 (`JobId`/`Program`/`CalcType`/`Job`/`JobEdge`/`JobSpec`)
+- `JobFlow.work_dir` 撤廃 (Phase 0 D2 PR)
+- SP-1 follow-up で `flow.work_dir` 参照を `PathResolver::flow_dir(&uuid)` に置換 (Phase 1)
+- JobId 命名規約 `<step_id>__<axis>=<idx>__...` (Python ユーザーが採用する規約。Rust の helper で構築・検証・パース)
+- `ExperimentPlan` sidecar (`plan.toml`) で per-job params を保持 (SP-3 が bash 本体 render で使う)
+- `PathResolver::plan_toml(&uuid)` / `experiment_toml(&uuid)` getter
+
+### v4 から削る決定 (案 B 採用に伴う)
+
+- `experiment.toml` schema 仕様 (§4) → 削除
+- `${...}` placeholder 文法 (§4.5) → 削除
+- Sweep 展開アルゴリズム (§6) → 削除
+- Parent 解決セマンティクス (§7) → 削除
+- Legacy 形状検出 (8 種) → 削除
+- `expand_experiment` 公開 API → 削除
+- `crate::grammar` モジュール全体 → 削除 (jobid 機能は `crate::jobid` に再配置)
 
 ---
 
 ## 1. 背景
 
-SP-1 で確立した「データ層 + 並列走査 + tick」基盤の上に、ユーザー入力 `experiment.toml` を D2 `JobFlow` + 最小限の `ExperimentPlan` sidecar に展開する **grammar 層**を構築する。SP-3 (submit + CLI) はこの 2 ファイル (`flow.toml`, `plan.toml`) を入力として bash 生成・sbatch 投入を行う。
+SP-1 で確立した「データ層 + 並列走査 + tick」基盤の上に、SP-3 (submit + CLI) が必要とする最小限の追加機能だけを実装する:
 
-### 1.1 Python 実装 (リファレンス) の課題
+1. **per-job params の永続化** (`plan.toml` sidecar) — SP-3 が bash 本体を render する時の入力
+2. **JobId helpers** — search や Python authoring で必要な validate / build / parse 関数
+3. **PathResolver の getter 追加** — `plan.toml` / `experiment.toml`-equivalent の path 解決
 
-`gaussian-experiment-manager/grammar/` のレビューで顕在化した問題:
+### 1.1 ユーザーの authoring 体験 (Python)
 
-1. **`step.compounds` が first-class** — Gaussian 専用設計
-2. **axis element の reserved key (`compounds`, `tags`) が暗黙** — cross-axis collision が silent merge (`sweep.py:78` TODO)
-3. **`step.parent: str` 単数** — 真の DAG fan-in 不可
-4. **parent 解決が set 比較の暗黙ディスパッチ** (`chain.py:62-72`)
-5. **`step.id: str | None` optional** — `'<no-id>'` フォールバックが UX 汚染
-6. **`step.calc_type` per-step** — JobFlow 単位で持つべき情報
-7. **`${axis.field}` 展開が string 限定** で int/float が型ロス
-8. **SLURM dependency kind が `afterok` 固定**
+ユーザーは Python で直接 `JobFlow` と `ExperimentPlan` を構築する:
+
+```python
+from itertools import product
+from uuid import uuid7
+from datetime import datetime, timezone
+
+from gaussian_job_shared import JobFlow, JobId, Job, JobSpec, Program, JobEdge
+from slurm_async_runner import DependencyType, SlurmJobConfig
+from job_manager import (
+    ExperimentPlan, PathResolver,
+    write_flow, write_plan,
+    build_job_id, parse_job_id, validate_step_id,
+)
+
+# 軸定義 (Python のリストで十分)
+compounds = ["benzene", "toluene", "p-xylene"]
+methods = [{"name": "b3lyp", "route": "B3LYP"}, {"name": "m062x", "route": "M06-2X"}]
+
+validate_step_id("opt")
+validate_step_id("freq")
+
+jobs: dict[JobId, Job] = {}
+params: dict[JobId, dict] = {}
+
+# Sweep 展開 (itertools.product) と placeholder 展開 (f-string)
+for (i, c), (j, m) in product(enumerate(compounds), enumerate(methods)):
+    opt_id = JobId(build_job_id("opt", [("compound", i), ("method", j)]))
+    jobs[opt_id] = Job(
+        spec=JobSpec(program=Program("g16"), config=SlurmJobConfig.default(), body=""),
+        parents=[],
+    )
+    params[opt_id] = {
+        "route": f"# {m['route']}/6-31G* opt",
+        "compound": c,
+        "nproc": 16,
+    }
+
+    # pair_by_axes (opt → freq): 同じ axis_combo を共有
+    freq_id = JobId(build_job_id("freq", [("compound", i), ("method", j)]))
+    jobs[freq_id] = Job(
+        spec=JobSpec(program=Program("g16"), config=SlurmJobConfig.default(), body=""),
+        parents=[JobEdge(from_=opt_id, kind=DependencyType.AfterOk)],
+    )
+    params[freq_id] = {
+        "route": f"# {m['route']}/6-31G* freq",
+        "compound": c,
+        "nproc": 16,
+    }
+
+flow = JobFlow(
+    uuid=uuid7(),
+    created_at=datetime.now(timezone.utc),
+    tags={"calc_type": "opt+freq", "project": "tddft"},
+    jobs=jobs,
+)
+plan = ExperimentPlan(jobs=params)
+
+resolver = PathResolver("/work_dir")
+write_flow(resolver.flow_toml(flow.uuid), flow)
+write_plan(resolver.plan_toml(flow.uuid), plan)
+```
+
+**Python authoring の利点:**
+- itertools / list 内包表記 / f-string が使える
+- 条件分岐 (例: 特定の compound だけ method を限定) が自然
+- 既存 Python ライブラリ (pandas, numpy 等) と統合可能
+- 型ヒントが効く (`mypy` / `pyright`)
+
+**`fanout` / `reduce_over` 相当のパターン:**
+
+```python
+# fanout: 1 preflight job, then N opt jobs each depending on preflight
+preflight_id = JobId("preflight")
+jobs[preflight_id] = Job(spec=..., parents=[])
+
+for (i, c), (j, m) in product(enumerate(compounds), enumerate(methods)):
+    opt_id = JobId(build_job_id("opt", [("compound", i), ("method", j)]))
+    jobs[opt_id] = Job(
+        spec=...,
+        parents=[JobEdge(from_=preflight_id, kind=DependencyType.AfterOk)],
+    )
+
+# reduce_over: M scan jobs reduce to 1 compare job
+scan_ids = [...]  # all scan__theta=k jobs
+for c_idx, c in enumerate(compounds):
+    compare_id = JobId(build_job_id("compare", [("compound", c_idx)]))
+    jobs[compare_id] = Job(
+        spec=...,
+        parents=[JobEdge(from_=sid, kind=DependencyType.AfterOk)
+                 for sid in scan_ids
+                 if parse_job_id(str(sid))["axis_combo"][0] == ("compound", c_idx)],
+    )
+```
+
+これらは Python の通常のロジックで書ける。Rust grammar 層は不要。
 
 ### 1.2 SP-2 のスコープ
 
-| 含める | 含めない (SP-3) |
+| 含める | 含めない |
 |---|---|
-| `experiment.toml` のパース (strict、unknown key 拒否) | `common.toml` (cluster/account-level config) のマージ |
-| Legacy `gaussian_batch.toml` 形状の検出 + エラー | bash body の rendering (`#SBATCH` block + 本文) |
-| `[[axis]]` sweep 展開 (itertools.product 相当) | `SlurmJobConfig` の partition/account/time-limit 等の合成 |
-| `${axis}` / `${axis.field}` プレースホルダ展開 | sbatch 投入 (A1 `SbatchManager` 経由) |
-| 親 (`parents = [...]`) の解決 (pair / fanout / reduce) | CLI コマンド (`run`/`submit`/...) |
-| `JobFlow` (D2 newtype 利用) 構築 | log_paths 解決 (SLURM `%j`/`%x` 展開) |
-| 最小 `ExperimentPlan` sidecar 構築 | β-adapter / `gaussian_batch_cli` 互換 |
-| JobId 文字種・予約名 validation | newtype 撤廃 (v3 で取消、本 spec でも変更しない) |
-| `parse_job_id` helper (借用ベース) | |
-| **D2 `JobFlow.work_dir` フィールド撤廃 (要 D2 PR)** | **D2 の他フィールド変更** |
+| `crate::plan::ExperimentPlan` + atomic I/O | `experiment.toml` schema parser |
+| `crate::jobid::{validate_step_id, validate_job_id, build_job_id, parse_job_id, JobIdParts}` | sweep / placeholder / parent 解決 DSL |
+| `PathResolver::plan_toml() / experiment_toml()` getter | `expand_experiment` 公開関数 |
+| Python pyfunctions / pyclass の re-export | `gaussian_batch.toml` legacy 互換 |
+| **D2 `JobFlow.work_dir` 撤廃 (Phase 0)** | bash 本体 render (SP-3) |
+| **SP-1 follow-up: work_dir 参照置換 (Phase 1)** | sbatch 投入 (SP-3) |
+| | CLI コマンド (SP-3) |
 
 ### 1.3 サブプロジェクト位置付け
 
 ```
 SP-1 (データ層, 完, follow-up PR で work_dir 撤廃)
        ↓
-D2 PR (JobFlow.work_dir 撤廃のみ — newtype は保持)
+D2 PR (JobFlow.work_dir 撤廃のみ)
        ↓
-       SP-2 (grammar, 本 spec)   ←── SP-3 (submit + CLI)
+       SP-2 (plan + jobid helpers, 本 spec)   ←── SP-3 (submit + CLI)
 ```
 
 ---
 
-## 2. 採用アプローチ: **Pure-Rust grammar + 最小 sidecar `plan.toml`**
+## 2. 採用アプローチ
 
-### 2.1 比較した 3 案
+### 2.1 比較した 3 案 (再掲、案 B を採用)
 
-| 比較項目 | A (採用) | B: 自前完結 JobFlow | C: Python 側で expand |
+| | A: Rust DSL (v4) | **B: Python authoring (v5 採用)** | C: Python 完全委譲 |
 |---|---|---|---|
-| TOML パース | Rust serde + 手書き validation | Rust serde | Python tomllib |
-| Sweep / parent 解決 | Rust 純粋関数 | 同 | Python |
-| `params` の所在 | `plan.toml` (job_id → params dict) | 自前 `Job` 構造に `params` フィールド追加 | Python メモリ内 |
-| D2 への侵襲 | **work_dir 撤廃のみ** (newtype は import 利用) | params フィールド追加 (D2 が grammar 概念を持つ) | なし |
-| Shared definition 活用 | ✅ D2 の `JobId`/`Program`/`CalcType` を import | ⚠️ D2 に grammar 知識を持ち込む | N/A |
-| 再実装の動機適合 | ✅ | ⚠️ | ❌ |
+| experiment.toml | Rust が parse | 不要 | 既存 Python tool が parse |
+| sweep / placeholder | Rust 純粋関数 | Python (itertools, f-string) | Python tool |
+| Rust SP-2 規模 | 大 (1500+ 行) | 小 (250 行) | 極小 (100 行) |
+| ユーザーの authoring | TOML DSL | Python | TOML (Python tool 経由) |
+| 学習コスト | DSL 仕様 | Python (既知) | TOML + Python tool |
+| 拡張性 | DSL 拡張が必要 | Python の任意の機能 | Python tool 改変 |
 
-**判断:**
-- B は D2 が「grammar 由来の per-step params」を持つことになり、責務 (汎用 DAG コンテナ) を超える
-- C は Pure-Rust pipeline 化の動機を満たさない
-- **A**: D2 の newtype は温存、`work_dir` のみ撤廃 (redundant)、`params` だけ job-manager 側 `plan.toml`
+**B を採用した理由:**
+- DSL は declarative で簡潔だが、Rust 実装のメンテ負担に見合わない
+- Python は表現力が高く、ユーザーは既に Python を書ける (SP-1 / SP-3 の Python API を使う)
+- C は既存 `gaussian-experiment-manager` (legacy) に依存し続けることになり、新規プロジェクトの足かせ
+- B は Rust SP-2 を小さく保ち、Python 側で UX を作りやすい (ヘルパー関数を Python で書ける)
 
-### 2.2 案 A の設計判断
+### 2.2 案 B の設計判断
 
-- **D2 newtype を不可侵に扱う** — `JobId`/`Program`/`CalcType`/`Job`/`JobEdge`/`JobSpec` を import して使う
-- **`JobFlow.work_dir` のみ撤廃** — `<root>/<uuid>/` で導出。SoT が PathResolver に集約 (drift 防止)
-- **`expand_experiment(toml_path) -> (JobFlow, ExperimentPlan)` は純粋関数** — work_dir が無くなることで `root` 引数も不要に
-- **`JobSpec.body` と `JobSpec.config` は SP-2 時点では空** (`String::new()` / `SlurmJobConfig::default()`)。SP-3 が `plan.toml` の `params` + `common.toml` を merge して埋める
-- **JobFlow uuid は v7** (SP-1 と一貫)
+- **`JobFlow` / `ExperimentPlan` を最終的な authoring 形式とする** — ユーザーは Python でこれらを構築
+- **Rust helper を最小化** — `JobId` 命名規約の helper だけ Rust で提供 (validation, build, parse)
+- **TOML 永続化は struct の serde 直接** — `flow.toml` (D2 JobFlow) / `plan.toml` (ExperimentPlan)
+- **D2 newtype を不可侵に扱う** — `JobId`/`Program`/`CalcType`/`Job`/`JobEdge`/`JobSpec` を import
+- **`JobFlow.work_dir` のみ撤廃** — `<root>/<uuid>/` で導出 (Phase 0)
 
-### 2.3 TOML ファイルと Rust 型の対応関係 (重要)
+### 2.3 TOML ファイルと Rust 型の対応関係
 
-SP-2 で扱う TOML には **2 種類** あり、Rust 型との結合度が異なる:
+SP-2 v5 では TOML は **2 種類のみ**:
 
-| TOML | 役割 | 対応 Rust 型 | 結合方式 | 1:1 対応? |
-|---|---|---|---|---|
-| `experiment.toml` | **入力 grammar (DSL)** | (どの単一 struct とも非対応) | `crate::grammar::reader` が手動 parse して `ExperimentSource` に詰める | **❌ 非対応** |
-| `flow.toml` | **出力 (永続化)** | D2 `JobFlow` | `serde::{Serialize,Deserialize}` で round-trip (`#[serde(deny_unknown_fields)]`) | ✅ 対応 |
-| `plan.toml` | **出力 (永続化)** | `crate::plan::ExperimentPlan` | serde 直 round-trip | ✅ 対応 |
+| TOML | 役割 | 対応 Rust 型 | 結合方式 |
+|---|---|---|---|
+| `flow.toml` | JobFlow 永続化 | D2 `JobFlow` | serde 直 round-trip (`#[serde(deny_unknown_fields)]`) |
+| `plan.toml` | per-job params 永続化 | `crate::plan::ExperimentPlan` | serde 直 round-trip |
 
-**判断:**
+両方とも struct の serde mirror なので、**fixture file は不要** (in-memory tempdir で round-trip テスト)。
 
-- **`experiment.toml` は DSL/grammar** であり、struct の serde 表現ではない。
-  - `values = ["a", "b"]` (scalar axis) と `values = [{...}, {...}]` (struct axis) のような shape-dependent semantics は serde derive で表せない
-  - strict unknown key 拒否、`${...}` プレースホルダ、legacy 形状検出など、custom 制約は手動 parser でのみ実装可能
-  - `ExperimentSource` / `FlowMeta` / `AxisDef` / `RawStep` / `ParentRef` は **`#[derive(Serialize, Deserialize)]` を付けない** (`Debug`, `Clone` のみ) — 内部表現が serde で漏れることを防ぐ
-- **`flow.toml` と `plan.toml` は struct のミラー**。serde で 1:1 対応するので、テスト fixture を介さず in-memory で round-trip テスト可能 (tempdir に write → read → 比較)
-- ファイル配置も分離する:
-  - `tests/fixtures/experiment/*.toml` — 入力 grammar 例 (`expand_experiment` の入力)
-  - 出力 (flow.toml / plan.toml) は in-memory round-trip テストのみ。snapshot fixture は持たない (YAGNI、struct の serde 仕様 = 出力仕様)
-
-この分離により、「TOML ファイルを見ただけで struct shape が想定できる」誤解を防ぐ。`experiment.toml` は **必ず `expand_experiment` 経由でしか読まれない**。
+`experiment.toml` という名前のファイルは SP-2 では **作らない・読まない**。`PathResolver::experiment_toml(&uuid)` getter は将来用にエクスポートするが、SP-2 では使わない。
 
 ---
 
 ## 3. 必須 D2 変更 (`JobFlow.work_dir` 撤廃のみ)
 
-### 3.1 現状 (v3 までの D2)
+### 3.1 現状
 
 ```rust
 pub struct JobFlow {
@@ -166,183 +260,56 @@ pub struct JobFlow {
 ### 3.3 撤廃理由
 
 - 永続化値が `<root>/<uuid>/` 規約から導出可能 (redundant)
-- `mv` 等のディレクトリ移動で drift するリスクがある
-- `JobFlow` 自体は run/search に純粋なメタデータコンテナとして機能し、場所情報を持たない方がきれい
-- `PathResolver::flow_dir(&Uuid) -> PathBuf` で参照側はワンライナーで導出可能
+- `mv` 等のディレクトリ移動で drift するリスク
+- `JobFlow` を run/search に純粋なメタデータコンテナとして整理 (場所情報は PathResolver に集約)
 
 ### 3.4 影響範囲
 
-- **D2 (`gaussian-job-shared2`)**: `JobFlow` 定義、test 内 fixture、pyclass の getter/setter、TOML 例
-- **job-manager (SP-1 既 merged)**: `crate::view::CalcView` 等で `flow.work_dir` を参照している箇所を `PathResolver::flow_dir(&flow.uuid)` に書き換える (follow-up PR)
-- **job-manager (SP-2 本 spec)**: `to_jobflow_and_plan` / `expand_experiment` で work_dir を埋める処理を削除 — `root` 引数不要に
-- **`gaussian-experiment-manager` (legacy)**: 影響あり (SP-2 移行時に対応、本 spec の責務外)
+- D2 (`gaussian-job-shared2`): struct 定義、tests、pyclass getter/setter
+- job-manager (SP-1 既 merged): `crate::view::CalcView` 等で `flow.work_dir` を参照 → `PathResolver::flow_dir(&flow.uuid)` (follow-up PR)
+- job-manager (SP-2 本 spec): 影響なし (元々 work_dir を直接参照しない)
 
 ### 3.5 newtype は撤廃しない
 
-`JobId` / `Program` / `CalcType` は v3 と同様 D2 の正典定義を import して使う。job-manager 側で再定義 / 別名作成は行わない。
+`JobId` / `Program` / `CalcType` は D2 の正典定義を import して使う。job-manager 側で再定義 / 別名作成は行わない。
 
 ---
 
-## 4. `experiment.toml` Schema 仕様
+## 4. JobId 命名規約 (Python authoring 用)
 
-### 4.1 全体構造
-
-```toml
-# 最上位許可キー: flow, axis, step のみ。strict (unknown key reject)。
-[flow]                                    # 任意 block
-calc_type = "opt+freq+td"                 # → JobFlow.tags["calc_type"]
-tags      = { project = "tddft" }         # → JobFlow.tags にマージ
-
-[[axis]]                                  # 軸定義 (0 以上)
-name   = "compound"
-values = ["benzene", "toluene"]           # list<str> = scalar axis
-
-[[axis]]
-name   = "method"
-values = [                                # list<table> = struct axis
-    { name = "b3lyp", route = "B3LYP" },
-    { name = "m062x", route = "M06-2X" },
-]
-
-[[step]]                                  # ステップ定義 (1 以上)
-id      = "opt"                           # 必須・unique・JobId 文字種制約あり
-program = "g16"                           # 必須
-sweep   = ["compound", "method"]          # 任意
-parents = []                              # 任意
-
-[step.params]                             # 任意 dict<str, toml::Value> (${...} 展開対象)
-route = "# ${method.route}/6-31G* opt"
-```
-
-**v1 (Python 実装) からの差分:** `[step.tags]` block を削除 (per-job tags 不採用)。`[flow.tags]` は引き続き JobFlow.tags にマージされる (search 用)。
-
-### 4.2 `[flow]` block
-
-```toml
-[flow]
-calc_type = "opt+freq+td"        # 任意。文字列。JobFlow.tags["calc_type"] になる。
-tags      = { ... }              # 任意。BTreeMap<String, String>.
-```
-
-- `tags` 内に `"calc_type"` キーがあれば error (重複表現)
-- 値はすべて string
-
-### 4.3 `[[axis]]` block
-
-```toml
-[[axis]]
-name   = "method"                # 必須。識別子 `[A-Za-z_][A-Za-z0-9_]*`
-values = [ ... ]                 # 必須。空リスト禁止。
-```
-
-- `values` の型:
-  - **scalar axis**: `list<string>` — `${<name>}` で要素文字列を展開
-  - **struct axis**: `list<table>` — 全要素が同じキー集合、値は string/int/float/bool
-- 混在はエラー
-- duplicate `name` はエラー
-
-### 4.4 `[[step]]` block
-
-```toml
-[[step]]
-id      = "opt"                        # 必須・unique・JobId 文字種
-program = "g16"                        # 必須
-sweep   = ["compound", "method"]       # 任意
-parents = [ ... ]                      # 任意
-[step.params]                          # 任意 dict<str, toml::Value>. ${...} は string 値内のみ展開。
-```
-
-- `id` 文字種: `[A-Za-z0-9_\-]+`
-- `id` 予約名禁止: `flow`, `plan`, `experiment`, `derived`, `status`
-- `id` の duplicate (別 step 間) はエラー
-- `sweep` の要素は `[[axis]]` で定義済みの name、重複なし
-- `params` の値: TOML 標準型をそのまま保持、`${...}` は string 値内のみ再帰展開
-
-#### 4.4.1 `step.parents`
-
-```toml
-parents = [
-    { id = "opt" },                                   # pair_by_axes (default)
-    { id = "preflight", fanout = true },              # 1:N
-    { id = "scan", reduce_over = ["theta"] },         # N:1
-    { id = "opt", kind = "afterany" },                # SLURM dependency kind 上書き
-]
-```
-
-| Field | Type | Default | 意味 |
-|---|---|---|---|
-| `id` | `string` | (必須) | 参照先 step.id |
-| `fanout` | `bool` | `false` | true = 親軸が子軸の真部分集合と validate |
-| `reduce_over` | `list<string>` | `[]` | 非空 = 親軸 = 子軸 ∪ reduce_over と validate |
-| `kind` | `string` | `"afterok"` | SLURM `DependencyType` |
-
-**Mode 決定ルール:**
-
-| `fanout` | `reduce_over` | Mode | Validation |
-|---|---|---|---|
-| `false` | `[]` | pair_by_axes | parent.sweep == child.sweep |
-| `true` | `[]` | fanout | parent.sweep ⊊ child.sweep |
-| `false` | 非空 | reduce_over | parent.sweep == child.sweep ∪ reduce_over |
-| `true` | 非空 | **error** | `BothFanoutAndReduce` |
-
-#### 4.4.2 Legacy 形状検出
-
-- 最上位に `[gaussian_input]` block → `LegacyToml`
-- `[env].compound_id` / `[env].project_base` → 同上
-- `[[sweep]]` block → `LegacyToml { hint: "[[sweep]] was renamed to [[axis]]" }`
-- `step.compounds` → `LegacyToml { hint: "step.compounds was removed; use [[axis]] name=\"compound\"" }`
-- `step.calc_type` → `LegacyToml { hint: "step.calc_type was moved to [flow].calc_type" }`
-- `step.parent` (単数) → `LegacyToml { hint: "step.parent was renamed to step.parents (list)" }`
-- `step.sweep_over` → `LegacyToml { hint: "step.sweep_over was renamed to step.sweep" }`
-- `step.tags` → `LegacyToml { hint: "step.tags was removed in v2 (per-job tags 不採用)" }`
-
-### 4.5 Placeholder syntax `${...}`
+### 4.1 形式
 
 ```
-${ident}                  # scalar axis 参照
-${ident.ident}            # struct axis field 参照
+<step_id>                                  # sweep 空のとき
+<step_id>__<axis1>=<idx>__<axis2>=<idx>    # sweep のとき
 ```
 
-- 展開対象: **string 型 TOML 値の中のみ**。`step.params` を再帰的に走査
-- 値が int/float/bool の場合は `Display` で文字列化
-- 各種エラー: `PlaceholderUnknownAxis` / `PlaceholderUnknownField` / `PlaceholderInvalidScalarField` / `PlaceholderAmbiguousStructAxis` / `PlaceholderAxisNotInSweep` / `PlaceholderSyntaxError`
-- エスケープ: `$${...}` で literal `${...}`
-
----
-
-## 5. JobId 命名規約 (決定論的)
-
-### 5.1 形式
-
-```
-<step.id>                                  # sweep 空のとき
-<step.id>__<axis1>=<idx>__<axis2>=<idx>    # sweep のとき (axis 順 = step.sweep 宣言順)
-```
-
-例 (step.id="opt", sweep=["compound", "method"]):
+例:
+- `opt`
 - `opt__compound=0__method=0`
-- `opt__compound=0__method=1`
+- `freq__compound=2__method=1`
 
-### 5.2 文字種・予約名
+### 4.2 文字種・予約名
 
 - 許可文字: `[A-Za-z0-9_\-=]+`
-- step.id 自体の許可文字は `[A-Za-z0-9_\-]+` (`=` は予約)
+- step_id 自体の許可文字: `[A-Za-z0-9_\-]+` (`=` は予約)
 - 予約 JobId: `flow`, `plan`, `experiment`, `derived`, `status`
-- duplicate JobId は build 段階で error
 
-### 5.3 D2 newtype の使い方
+これらの規約は **Python ユーザーが採用する慣用**であり、D2 の `JobId(pub String)` 自体は文字種制約を持たない。ユーザーは `build_job_id` / `validate_step_id` / `parse_job_id` ヘルパーを使って規約に従う。
 
-D2 の `JobId(pub String)` は **string-newtype**。job-manager 内の表現規約は:
-
-- **構築**: `JobId::from(build_job_id(step_id, axis_combo))`
-- **検証**: `validate_job_id(s: &str) -> Result<&str, JobManagerError>` を構築前に呼ぶ
-- **借用パース**: `parse_job_id(s: &str) -> Result<JobIdParts<'_>, JobManagerError>` に `&job_id.0` を渡す
-
-### 5.4 JobId パースによる導出可能性
-
-JobId が `<step_id>__<axis>=<idx>__...` の決定論的形式を保つので、SP-3 やその他の consumer は以下を導出できる:
+### 4.3 ヘルパー API
 
 ```rust
+/// step_id の検証 (`[A-Za-z0-9_-]+`、予約名禁止)。OK なら入力を返す。
+pub fn validate_step_id(s: &str) -> Result<&str, JobManagerError>;
+
+/// JobId 全体の検証 (文字種 + 予約名 + sweep encoding を含めた整合性)
+pub fn validate_job_id(s: &str) -> Result<&str, JobManagerError>;
+
+/// JobId 文字列を組み立てる (D2 newtype 包装は呼び側 `JobId::from(...)`)
+pub fn build_job_id(source_step_id: &str, axis_combo: &[(&str, usize)]) -> String;
+
+/// 借用ベース parse (alloc なし)。`&job_id.0` または string literal を渡す。
 pub fn parse_job_id(s: &str) -> Result<JobIdParts<'_>, JobManagerError>;
 
 pub struct JobIdParts<'a> {
@@ -351,166 +318,72 @@ pub struct JobIdParts<'a> {
 }
 ```
 
-→ `ExperimentPlan` 側で `source_step_id` / `axis_combo` を冗長に保持する必要がない。
+### 4.4 SP-3 / search での使い方
+
+- **search** (SP-1 既存): `flow.jobs[*].spec.program` で program 絞り込み。step_id / axis_combo を絞りたい時は `parse_job_id(&jid.0)` で分解
+- **SP-3 bash render**: `plan.jobs[&job_id]` で params を取得し、`parse_job_id` で `axis_combo` の値を参照 (compound 名等を bash header に含めたい場合)
 
 ---
 
-## 6. Sweep 展開セマンティクス
+## 5. `ExperimentPlan` 仕様
 
-### 6.1 アルゴリズム
-
-```
-for each step:
-    if step.sweep is empty:
-        emit ExpandedStep with axis_combo = {}
-    else:
-        let axes = [resolve(name) for name in step.sweep]
-        for indices in itertools.product(*[range(len(ax.values)) for ax in axes]):
-            let combo = { name_i: indices_i for (name_i, indices_i) in zip(step.sweep, indices) }
-            let expansion_ctx = { name_i: axes[i].values[indices_i] for i in ... }
-            emit ExpandedStep {
-                source_step_id: step.id,
-                axis_combo: combo,
-                program: step.program,
-                params: expand_placeholders(step.params, expansion_ctx),
-                parents_raw: step.parents,
-            }
-```
-
-`ExpandedStep` は **中間表現** で、最終出力 (JobFlow + ExperimentPlan) には持ち込まない。axis_combo / source_step_id は JobId 文字列に埋め込まれて消える。
-
-### 6.2 順序保証
-
-`step` 出現順、各 step 内では axis 宣言順の product (最後の axis が最速回転)。
-
----
-
-## 7. Parent 解決セマンティクス
-
-### 7.1 全体フロー
-
-```
-expanded: list<ExpandedStep>
-step_index_by_id: BTreeMap<step.id, list<expanded_idx>>
-
-for child in expanded:
-    for parent_ref in child.parents_raw:
-        let parent_step = lookup(parent_ref.id)
-        let parents_expanded = step_index_by_id[parent_step.id]
-        let edges = resolve_edges(parent_ref, parent_step, child, parents_expanded)
-        child.parents.extend(edges)        # JobEdge { from: JobId, kind: DependencyType }
-```
-
-### 7.2 3 modes の解決ロジック
-
-#### pair_by_axes (default)
-
-```
-validate parent.sweep_set == child.sweep_set
-for parent_e in parents_expanded:
-    if all(parent_e.axis_combo[ax] == child_e.axis_combo[ax] for ax in parent.sweep):
-        emit JobEdge { from: parent_e.job_id, kind: parent_ref.kind }
-```
-
-#### fanout
-
-```
-validate parent.sweep_set ⊊ child.sweep_set
-for parent_e in parents_expanded:
-    if all(parent_e.axis_combo[ax] == child_e.axis_combo[ax] for ax in parent.sweep):
-        emit JobEdge { from: parent_e.job_id, kind: parent_ref.kind }
-```
-
-#### reduce_over
-
-```
-validate parent.sweep_set == child.sweep_set ∪ set(reduce_over)
-validate set(reduce_over) ⊆ parent.sweep_set
-validate set(reduce_over) ∩ child.sweep_set == ∅
-for parent_e in parents_expanded:
-    if all(parent_e.axis_combo[ax] == child_e.axis_combo[ax] for ax in child.sweep):
-        emit JobEdge { from: parent_e.job_id, kind: parent_ref.kind }
-```
-
-### 7.3 Validation 全列挙
-
-| Code | 条件 |
-|---|---|
-| `UnknownStepId` | `parents[].id` が `[[step]]` に未定義 |
-| `SelfParent` | `parents[].id == self.id` |
-| `BothFanoutAndReduce` | `fanout=true` かつ `reduce_over` 非空 |
-| `ReduceOverNotSubsetOfParent` | `reduce_over ⊄ parent.sweep` |
-| `ReduceOverIntersectsChild` | `reduce_over ∩ child.sweep ≠ ∅` |
-| `PairByAxesMismatch` | pair モードで parent.sweep != child.sweep |
-| `FanoutNotProperSubset` | fanout モードで parent.sweep ⊄ child.sweep または等しい |
-| `ReduceCoverageMismatch` | reduce モードで parent.sweep != child.sweep ∪ reduce_over |
-| `UnknownDependencyKind` | `kind` 文字列が `DependencyType::from_str` で parse 失敗 |
-| `DagHasCycle` | 構築後の DAG にサイクル (Kahn's algorithm で検出) |
-
----
-
-## 8. 出力アーティファクト
-
-### 8.1 `JobFlow` (D2 v4 形 — work_dir 撤廃後)
-
-```rust
-use gaussian_job_shared::entities::workflow::{JobFlow, Job, JobEdge, JobSpec, JobId, Program};
-use slurm_async_runner::entities::slurm::SlurmJobConfig;
-
-JobFlow {
-    uuid:        Uuid::now_v7(),
-    created_at:  Utc::now(),
-    tags:        { /* [flow.tags] + ("calc_type", value) if [flow].calc_type present */ },
-    jobs: BTreeMap {
-        JobId::from("opt__compound=0__method=0") => Job {
-            spec: JobSpec {
-                program: Program::from("g16"),
-                config:  SlurmJobConfig::default(),
-                body:    String::new(),
-            },
-            parents: vec![],
-        },
-        ...
-    },
-}
-```
-
-run + search に必要な情報のみ:
-- run: `jobs[*].spec.body` + `jobs[*].spec.config` で sbatch、`jobs[*].parents` で依存ワイヤリング。各 Job のディレクトリは `PathResolver::flow_dir(&flow.uuid).join(job_id.0.as_str())` で導出
-- search: `tags` (flow-level) + `jobs[*].spec.program` (per-job) + `created_at` + `uuid`
-
-### 8.2 `ExperimentPlan` (最小 sidecar)
+### 5.1 構造
 
 ```rust
 use gaussian_job_shared::entities::workflow::JobId;
+use std::collections::BTreeMap;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExperimentPlan {
     pub jobs: BTreeMap<JobId, BTreeMap<String, toml::Value>>,
 }
 ```
 
-`plan.toml` 永続化形:
+### 5.2 `plan.toml` 永続化形
 
 ```toml
 [jobs."opt__compound=0__method=0"]
 route = "# B3LYP/6-31G* opt"
+compound = "benzene"
+nproc = 16
+
+[jobs."opt__compound=0__method=1"]
+route = "# M06-2X/6-31G* opt"
+compound = "benzene"
+nproc = 16
+
+[jobs."freq__compound=0__method=0"]
+route = "# B3LYP/6-31G* freq"
+compound = "benzene"
 nproc = 16
 ```
 
-**v1 (Python 実装) からの差分:**
-- `plan_version` / `flow_uuid` / `source_hash` 撤廃
-- `PlanEntry` 構造体撤廃、`params` のみフラットに
-- `source_step_id` / `axis_combo` 撤廃 (JobId パースで導出)
-- `tags` 撤廃
+### 5.3 I/O
 
-### 8.3 FS レイアウト
+```rust
+pub fn read_plan(path: &Path) -> Result<ExperimentPlan, JobManagerError>;
+pub fn write_plan(path: &Path, plan: &ExperimentPlan) -> Result<(), JobManagerError>;
+```
+
+`write_plan` は SP-1 の `flow_io` と同じ atomic rename pattern (`tmp_path` 経由)。
+
+### 5.4 設計判断
+
+- `params` の値は `toml::Value` (任意の TOML 型を保持、SP-3 が解釈)
+- key は D2 の `JobId` (Pyclass Single Owner)
+- `plan.toml` は **`flow.toml` と必ず 1:1 対応** (同じ `<root>/<uuid>/` 下に置く)
+- `flow.toml` にある JobId は `plan.toml` に必ず存在する、逆も真 — invariant は呼び側責務 (SP-2 はチェックしない)
+
+---
+
+## 6. FS レイアウト
 
 ```
 <root>/                                # PathResolver.root
-└── <flow.uuid>/                       # PathResolver で導出 (D2 に永続化フィールド無し)
-    ├── flow.toml                      # JobFlow (D2 v4 形)
-    ├── plan.toml                      # ExperimentPlan
-    ├── experiment.toml                # 入力 TOML のコピー
+└── <flow.uuid>/                       # PathResolver::flow_dir(&uuid) で導出
+    ├── flow.toml                      # JobFlow (D2 v4)
+    ├── plan.toml                      # ExperimentPlan (本 SP-2)
     └── <JobId>/                       # 各 Job のディレクトリ
         ├── .status.toml               # SP-1
         ├── input.gjf                  # SP-3
@@ -519,318 +392,208 @@ nproc = 16
 ```
 
 `PathResolver` に追加する getter:
-- `plan_toml(&Uuid) -> PathBuf` → `<root>/<uuid>/plan.toml`
-- `experiment_toml(&Uuid) -> PathBuf` → `<root>/<uuid>/experiment.toml`
+
+```rust
+impl PathResolver {
+    pub fn plan_toml(&self, flow_uuid: &Uuid) -> PathBuf {
+        self.flow_dir(flow_uuid).join("plan.toml")
+    }
+
+    /// 将来、ユーザーが experiment 定義 Python script を flow dir に保存したい場合の
+    /// 慣用 path。SP-2 では使わない。
+    pub fn experiment_toml(&self, flow_uuid: &Uuid) -> PathBuf {
+        self.flow_dir(flow_uuid).join("experiment.toml")
+    }
+}
+```
 
 ---
 
-## 9. Rust モジュール構成
+## 7. Rust モジュール構成
 
-### 9.1 ディレクトリレイアウト
+### 7.1 ディレクトリレイアウト
 
 ```
 src/
-├── grammar/
-│   ├── mod.rs                  # re-exports + expand_experiment pipeline
-│   ├── source.rs               # data types
-│   ├── reader.rs               # parse_experiment (strict + legacy detect)
-│   ├── placeholder.rs          # ${...} lex + expand
-│   ├── sweep.rs                # expand_sweeps
-│   ├── jobid.rs                # validate / parse / build helpers
-│   ├── chain.rs                # resolve_parents + cycle check
-│   └── build.rs                # to_jobflow_and_plan
+├── jobid.rs                    # CREATE: validate / build / parse helpers
 ├── plan/
-│   ├── mod.rs                  # ExperimentPlan
-│   └── io.rs                   # read_plan / write_plan (atomic rename)
+│   ├── mod.rs                  # CREATE: ExperimentPlan
+│   └── io.rs                   # CREATE: read_plan / write_plan (atomic rename)
 ├── path.rs                     # MODIFY: plan_toml(), experiment_toml() getter 追加
-├── error.rs                    # MODIFY: GrammarError variant 群追加
+├── error.rs                    # MODIFY: JobId* バリアント追加
 └── py_export/
-    ├── grammar.rs              # expand_experiment pyfunction
-    └── plan.rs                 # ExperimentPlan pyclass
+    ├── jobid.rs                # CREATE: validate/build/parse pyfunctions
+    └── plan.rs                 # CREATE: PyExperimentPlan + read_plan/write_plan
 ```
 
-### 9.2 主要型シグネチャ
+`crate::grammar` モジュールは **作らない**。
 
-#### grammar/source.rs
+### 7.2 主要型シグネチャ
 
-```rust
-use gaussian_job_shared::entities::workflow::{Program, CalcType};
-use slurm_async_runner::entities::slurm::DependencyType;
-
-#[derive(Debug, Clone)]
-pub struct ExperimentSource {
-    pub flow: FlowMeta,
-    pub axes: Vec<AxisDef>,
-    pub steps: Vec<RawStep>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct FlowMeta {
-    pub calc_type: Option<CalcType>,            // D2 newtype を import 利用
-    pub tags: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AxisDef {
-    pub name: String,
-    pub values: AxisValues,
-}
-
-#[derive(Debug, Clone)]
-pub enum AxisValues {
-    Scalar(Vec<String>),
-    Struct { fields: Vec<String>, rows: Vec<BTreeMap<String, toml::Value>> },
-}
-
-#[derive(Debug, Clone)]
-pub struct RawStep {
-    pub id: String,                             // step.id (grammar-only). JobId と別概念。
-    pub program: Program,                       // D2 newtype 直
-    pub sweep: Vec<String>,
-    pub parents: Vec<ParentRef>,
-    pub params: BTreeMap<String, toml::Value>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ParentRef {
-    pub id: String,                             // step.id 参照 (展開前)
-    pub fanout: bool,
-    pub reduce_over: Vec<String>,
-    pub kind: DependencyType,
-}
-```
-
-#### grammar/jobid.rs
+#### jobid.rs
 
 ```rust
+use crate::error::JobManagerError;
+
 pub fn validate_step_id(s: &str) -> Result<&str, JobManagerError>;
 pub fn validate_job_id(s: &str) -> Result<&str, JobManagerError>;
 pub fn build_job_id(source_step_id: &str, axis_combo: &[(&str, usize)]) -> String;
 pub fn parse_job_id(s: &str) -> Result<JobIdParts<'_>, JobManagerError>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobIdParts<'a> {
     pub source_step_id: &'a str,
     pub axis_combo: Vec<(&'a str, usize)>,
 }
 ```
 
-#### grammar/build.rs
+#### plan/mod.rs
 
 ```rust
-use gaussian_job_shared::entities::workflow::JobFlow;
+use gaussian_job_shared::entities::workflow::JobId;
+use std::collections::BTreeMap;
 
-pub(crate) fn to_jobflow_and_plan(
-    flow_meta: &FlowMeta,
-    resolved: Vec<ResolvedStep>,
-) -> Result<(JobFlow, ExperimentPlan), JobManagerError>;
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExperimentPlan {
+    pub jobs: BTreeMap<JobId, BTreeMap<String, toml::Value>>,
+}
 ```
 
-注: v4 では `root` 引数不要 (`JobFlow.work_dir` が撤廃されるため)。
-
-#### grammar/mod.rs (公開 API)
+#### plan/io.rs
 
 ```rust
-use gaussian_job_shared::entities::workflow::JobFlow;
+use std::path::Path;
+use crate::error::JobManagerError;
+use crate::plan::ExperimentPlan;
 
-/// `experiment.toml` → `(JobFlow, ExperimentPlan)`。pure (toml_path 読込のみ)。
-pub fn expand_experiment(
-    toml_path: &Path,
-) -> Result<(JobFlow, ExperimentPlan), JobManagerError>;
+pub fn read_plan(path: &Path) -> Result<ExperimentPlan, JobManagerError>;
+pub fn write_plan(path: &Path, plan: &ExperimentPlan) -> Result<(), JobManagerError>;
 ```
 
-### 9.3 エラー型 (拡張)
+### 7.3 エラー型 (拡張)
+
+`error.rs` に SP-1 既存 variants に加えて:
 
 ```rust
 #[derive(Debug, thiserror::Error)]
 pub enum JobManagerError {
     // ... SP-1 既存 ...
 
-    #[error("grammar parse error at {path}: {source}")]
-    GrammarTomlParse { path: PathBuf, #[source] source: toml::de::Error },
-
-    #[error("legacy TOML shape detected at {path}: {hint}")]
-    LegacyToml { path: PathBuf, hint: String },
-
-    #[error("unknown key '{key}' in {location}")]
-    UnknownKey { key: String, location: String },
-
-    #[error("missing required key '{key}' in {location}")]
-    MissingKey { key: String, location: String },
-
-    #[error("wrong type for '{key}' in {location}: expected {expected}, got {got}")]
-    WrongType { key: String, location: String, expected: &'static str, got: &'static str },
-
-    #[error("duplicate axis name '{0}'")]
-    DuplicateAxis(String),
-
-    #[error("axis '{0}' has empty values")]
-    EmptyAxis(String),
-
-    #[error("axis '{name}' has mixed scalar/struct values")]
-    MixedAxisValues { name: String },
-
-    #[error("axis '{name}' struct values have inconsistent fields at row {row}")]
-    StructAxisFieldMismatch { name: String, row: usize },
-
-    #[error("duplicate step id '{0}'")]
-    DuplicateStepId(String),
-
-    #[error("invalid step id '{0}': must match [A-Za-z0-9_-]+ and not be reserved")]
+    #[error("invalid step id '{0}': must match [A-Za-z0-9_-]+")]
     InvalidStepId(String),
 
-    #[error("step '{step}' references unknown axis '{axis}'")]
-    UnknownAxisRef { step: String, axis: String },
+    #[error("invalid job id '{0}': must match [A-Za-z0-9_\\-=]+")]
+    InvalidJobId(String),
 
-    #[error("step '{step}' has duplicate axis '{axis}' in sweep")]
-    DuplicateSweepAxis { step: String, axis: String },
-
-    #[error("step '{0}' parent references unknown step id '{1}'")]
-    UnknownStepId(String, String),
-
-    #[error("step '{0}' parent references itself")]
-    SelfParent(String),
-
-    #[error("parent ref for '{0}': cannot set both fanout=true and reduce_over=[...]")]
-    BothFanoutAndReduce(String),
-
-    #[error("parent ref for '{id}': pair_by_axes requires parent.sweep == child.sweep, got parent={parent:?}, child={child:?}")]
-    PairByAxesMismatch { id: String, parent: Vec<String>, child: Vec<String> },
-
-    #[error("parent ref for '{id}': fanout requires parent.sweep ⊊ child.sweep, got parent={parent:?}, child={child:?}")]
-    FanoutNotProperSubset { id: String, parent: Vec<String>, child: Vec<String> },
-
-    #[error("parent ref for '{0}': reduce_over coverage mismatch")]
-    ReduceCoverageMismatch(String),
-
-    #[error("unknown dependency kind '{0}'")]
-    UnknownDependencyKind(String),
-
-    #[error("placeholder ${{{0}}}: unknown axis (not in step.sweep)")]
-    PlaceholderAxisNotInSweep(String),
-
-    #[error("placeholder ${{{0}.{1}}}: unknown field on axis")]
-    PlaceholderUnknownField(String, String),
-
-    #[error("placeholder ${{{0}}}: scalar axis does not have fields")]
-    PlaceholderInvalidScalarField(String),
-
-    #[error("placeholder ${{{0}}}: struct axis requires .field selector")]
-    PlaceholderAmbiguousStructAxis(String),
-
-    #[error("placeholder syntax error at offset {offset}: {message}")]
-    PlaceholderSyntaxError { offset: usize, message: String },
-
-    #[error("DAG contains cycle involving {0:?}")]
-    DagHasCycle(Vec<String>),
-
-    #[error("reserved job id '{0}'")]
+    #[error("reserved id '{0}' (reserved: flow, plan, experiment, derived, status)")]
     ReservedJobId(String),
 
-    #[error("[flow].tags has reserved key 'calc_type' (use [flow].calc_type instead)")]
-    FlowTagsHasCalcType,
+    #[error("job id parse error in '{id}' at piece '{piece}': {reason}")]
+    JobIdParseError { id: String, piece: String, reason: String },
 }
 ```
 
 ---
 
-## 10. Python API (PyO3)
+## 8. Python API (PyO3)
 
 ```python
 from job_manager import (
-    expand_experiment,       # (toml_path: str) -> tuple[JobFlow, ExperimentPlan]
+    # plan
     ExperimentPlan,
     read_plan,
     write_plan,
-    parse_job_id,            # (job_id_str: str) -> dict
+    # jobid
+    build_job_id,
+    parse_job_id,
+    validate_step_id,
+    validate_job_id,
+    # path (SP-1 既存 + SP-2 追加)
+    PathResolver,
 )
-from job_manager import PathResolver
-from gaussian_job_shared import JobFlow, JobId    # D2 newtype を import (Pyclass Single Owner)
-
-flow, plan = expand_experiment("./experiment.toml")
-
-for job_id, job in flow.jobs.items():
-    print(job_id, job.spec.program)
-    params = plan.jobs[job_id]
-    parts = parse_job_id(str(job_id))
-    print(parts["source_step_id"], parts["axis_combo"])
-
-# 永続化
-resolver = PathResolver("/work_dir")
-from job_manager import write_flow
-write_flow(resolver.flow_toml(flow.uuid), flow)
-write_plan(resolver.plan_toml(flow.uuid), plan)
+from gaussian_job_shared import JobFlow, JobId, Job, JobSpec, Program, JobEdge
+from slurm_async_runner import DependencyType, SlurmJobConfig
 ```
 
+§1.1 にユーザーの authoring 例を示した。
+
 **設計判断:**
-- `expand_experiment` は sync (TOML パース・展開は CPU 軽い・I/O は toml_path 読込のみ)
-- `ExperimentPlan` は `jobs: dict[str, dict[str, Any]]` のみ公開 (pythonize、key は `JobId.0` の文字列表現)
-- `parse_job_id` は Python から JobId 文字列を構成要素に分解する helper
+- `parse_job_id(s: str)` は Python dict を返す: `{"source_step_id": str, "axis_combo": list[tuple[str, int]]}`
+- `build_job_id(step_id: str, axis_combo: list[tuple[str, int]]) -> str`
+- `validate_step_id` / `validate_job_id` は OK で input をそのまま返し、NG で `ValueError` を raise
+- `ExperimentPlan` は read-only Python view (`#[pyclass(frozen)]`)、`.jobs` getter で `dict[str, dict[str, Any]]` を返す
+- D2 の `PyJobId` / `PyProgram` / `PyCalcType` は D2 側でエクスポート済み (Pyclass Single Owner、再エクスポートしない)
 
 ---
 
-## 11. テスト計画
+## 9. テスト計画
 
-### 11.1 Unit tests (Rust, `#[cfg(test)]`)
+### 9.1 Unit tests (Rust, `#[cfg(test)]`)
 
-- `placeholder.rs`: `${a}` / `${a.b}` / `$${literal}` 正常 + malformed
-- `reader.rs`: 最小 valid / unknown key reject / legacy 8 パターン / axis scalar/struct/mixed
-- `sweep.rs`: sweep 空 / 多軸 product / placeholder 展開 / 全 axis 型
-- `chain.rs`: pair / fanout / reduce_over の正常 + error / kind バリエーション / DAG cycle
-- `jobid.rs`: 命名規約 / 予約名 reject / 文字種 reject / `parse_job_id` round-trip / `build_job_id` ↔ `parse_job_id` 整合
-- `build.rs`: JobFlow.uuid v7 / tags merge (`[flow].calc_type` + `[flow.tags]`) / calc_type 重複 error
+- `jobid.rs`:
+  - `validate_step_id`: 命名規約 OK / 予約名 reject / 文字種 reject / 空文字 reject
+  - `validate_job_id`: 同上 + `=` 含む形式 OK
+  - `build_job_id`: sweep 空 / 多軸 / 順序保証
+  - `parse_job_id`: round-trip / malformed reject / 文字種 reject
+  - `build_job_id` ↔ `parse_job_id` の整合性 (random axis_combo で)
 
-### 11.2 Integration tests (`tests/`)
+- `plan/mod.rs` / `plan/io.rs`:
+  - serde round-trip (BTreeMap key の順序、toml::Value の全型保持)
+  - atomic rename ( `.tmp` → final )
+  - missing file → `Io` エラー
+  - malformed TOML → `TomlParse` エラー
+  - deny_unknown_fields: 未知のトップレベルキーで reject
 
-- end-to-end `expand_experiment("fixtures/minimal.toml")` で JobFlow + plan 完全生成
-- 大きめ (axes 3x2x2 = 12, steps 3) で graph 構造の確認
-- `flow.toml` + `plan.toml` を tempdir に永続化し、read 戻して同型確認
-- JobFlow + plan + parse_job_id の三者整合性
+- `path.rs`:
+  - `plan_toml(&uuid)` / `experiment_toml(&uuid)` の path 構築
 
-### 11.3 Python tests (`python/tests/`)
+### 9.2 Integration tests (`tests/`)
 
-- `expand_experiment` の戻り値型 (D2 の `PyJobFlow` / `PyJobId` 等)
-- `parse_job_id` の Python 呼び出し
-- 各 fixture (minimal / sweep / parent / multi-parent / error)
-- 例外ラップ (Rust の `JobManagerError::Grammar*` が Python 例外に変換)
+- end-to-end の **flow + plan 構築 → 永続化 → 読み戻し** (Python 側でやる例を Rust integration test でも)
+- `tests/integration_plan.rs`:
+  - 12-job sample を Rust で構築 (compound 3 × method 2 × step 2)
+  - flow.toml + plan.toml を tempdir に永続化
+  - 読み戻して同型確認
+  - 各 JobId が `parse_job_id` で正しく分解できる
 
-### 11.4 fixture (`tests/fixtures/experiment/` — 入力 grammar 専用)
+### 9.3 Python tests (`python/tests/test_jobid.py` / `test_plan.py`)
 
-- `minimal_step.toml`: 1 step / no sweep / no parents
-- `single_axis.toml`: 1 axis × 1 step (sweep)
-- `pair_chain.toml`: 2 step, pair_by_axes
-- `fanout.toml`: parent axes ⊂ child axes
-- `reduce.toml`: parent axes ⊃ child axes
-- `multi_parent.toml`: 1 child, 2 parents
-- `legacy_*.toml`: 各 legacy 形状 (rejection)
-- `error_*.toml`: 各 validation error (rejection)
+- `validate_step_id` / `validate_job_id` の OK/NG 例
+- `build_job_id` の例
+- `parse_job_id` の例 (戻り値の dict 構造)
+- `ExperimentPlan` の `.jobs` getter
+- `write_plan` / `read_plan` の round-trip
+- §1.1 の authoring 例の動作確認 (Python で 12-job を構築して write)
 
-### 11.5 カバレッジ目標
+### 9.4 fixture
+
+**snapshot fixture は持たない** — flow.toml / plan.toml は struct の serde mirror なので、tempdir に write → read で round-trip 検証で十分。
+
+### 9.5 カバレッジ目標
 
 `cargo llvm-cov --fail-under-lines 80` で 80%+。
 
 ---
 
-## 12. リスクと未決事項
+## 10. リスクと未決事項
 
 | 項目 | リスク | 対応 |
 |---|---|---|
-| D2 PR の merge 順序 | D2 work_dir 撤廃 → job-manager SP-1 follow-up → SP-2 の順を厳守 | 各 PR の base/head 関係を明示。マイルストーン化 |
-| SP-1 follow-up の規模 | `JobFlow.work_dir` 参照箇所のみ。範囲は限定的 | 影響範囲を grep で網羅、PathResolver 経由に置換 |
-| `toml::Value` の serde round-trip | `params` を `BTreeMap<String, toml::Value>` で持ち plan.toml に書き戻す際の互換性 | integration test で round-trip 検証 |
-| `parse_job_id` の重複コスト | search 時に多数の JobId をパース | 借用ベース API `JobIdParts<'a>` で alloc 削減 |
-| Placeholder lex 性能 | 大規模 `params` で遅い可能性 | 1-pass scanner 手書き、`regex` 依存追加せず |
-| DAG cycle 検出のメモリ | O(V+E) で十分 | `petgraph` 依存追加せず手書き |
-| `gaussian-experiment-manager` (Python ref) との互換 | 入力 TOML schema は変わる | legacy detection で migration hint を返す |
-| common.toml 統合の遅延 | SP-3 まで `SlurmJobConfig::default()` で空 body | 既知の段取り、SP-3 spec で扱う |
-| axis values の type | TOML の Date/DateTime 等を `${...}` 展開時にどう扱うか | string/int/float/bool に制限。それ以外は `WrongType` |
-| Pyclass Single Owner rule | D2 の `PyJobId`/`PyProgram`/`PyCalcType` を job-manager が誤って再定義 | job-manager の `Cargo.toml` で D2 の `pyo3` feature をパス依存上で無効化 (SP-1 と同じ規約) |
+| D2 PR の merge 順序 | D2 work_dir 撤廃 → SP-1 follow-up → SP-2 の順厳守 | 各 PR の base/head 明示 |
+| SP-1 follow-up の規模 | `flow.work_dir` 参照箇所のみ | grep で網羅、PathResolver 経由に置換 |
+| `toml::Value` round-trip | `params: BTreeMap<String, toml::Value>` で書き戻し | integration test で round-trip 検証 |
+| `parse_job_id` 性能 | search で多数の JobId をパース | 借用ベース API (`JobIdParts<'a>`) で alloc 削減 |
+| Python authoring の UX | DSL がないので「sweep の書き方」をドキュメント化必要 | README + Python docstring + §1.1 を doc 化 |
+| Pyclass Single Owner rule | D2 の `PyJobId` を再定義しない | job-manager の `Cargo.toml` で D2 の `pyo3` feature をパス依存上で無効化 |
+| 既存 `gaussian-experiment-manager` との互換 | experiment.toml 形式が使えない | β-adapter は本 spec の責務外。ユーザーは Python authoring に移行 |
 
 ---
 
-## 13. 完了基準
+## 11. 完了基準
 
-- [ ] D2 PR (`JobFlow.work_dir` 撤廃) が D2 main に merge 済み
-- [ ] SP-1 follow-up PR (job-manager 側 work_dir 参照の置換) が main に merge 済み
+- [ ] D2 PR (`JobFlow.work_dir` 撤廃) merged
+- [ ] SP-1 follow-up PR (work_dir 参照置換) merged
 - [ ] `cargo build --all-features` 成功
 - [ ] `cargo test --lib` 成功 (カバレッジ 80%+)
 - [ ] `cargo clippy -- -D warnings` 成功
@@ -838,17 +601,18 @@ write_plan(resolver.plan_toml(flow.uuid), plan)
 - [ ] `uv run maturin develop` 成功
 - [ ] `uv run pytest python/tests` 成功
 - [ ] `cargo run --bin stub_gen` で `.pyi` 再生成、`ruff format` クリーン
-- [ ] `expand_experiment` を 12-job fixture で実行、JobFlow + plan の構造確認
-- [ ] 全 validation error path の Python テストが green
-- [ ] legacy detection が 8 種類すべてで適切な hint 文字列を返す
-- [ ] **D2 への変更が `JobFlow.work_dir` 撤廃のみであることを diff で確認** (newtype 等は変更しない)
+- [ ] §1.1 の Python authoring 例が動作 (12-job 構築 → write → read 戻し)
+- [ ] **`crate::grammar` モジュールが存在しないことを `git ls-files src/` で確認** (案 B 採用の確証)
+- [ ] **D2 への変更が `JobFlow.work_dir` 撤廃のみであることを diff で確認**
 
-## 14. 次工程
+---
+
+## 12. 次工程
 
 SP-2 完了後 (SP-3 で行う):
 - `common.toml` 読み込み + `SlurmJobConfig` 合成
-- `JobSpec.body` の bash render
+- `JobSpec.body` の bash render (`plan.toml` の `params` + `parse_job_id` の `axis_combo` を活用)
 - A1 `SbatchManager` 経由の `submit_chain` 相当
 - CLI: `run` / `submit` / `show` / `tick` / `search`
 
-SP-2 設計 v4 が承認されたら writing-plans skill で実装計画書 v4 (3 phases: D2 PR → SP-1 follow-up → SP-2) に変換する。
+SP-2 設計 v5 が承認されたら writing-plans skill で実装計画書 v5 (3 phases: D2 PR → SP-1 follow-up → SP-2 minimal) に変換する。
