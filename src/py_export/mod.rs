@@ -22,7 +22,7 @@ mod job_manager {
     // registering itself in `sys.modules` under its fully-qualified
     // name so `import job_manager._job_manager_core.manager` works
     // from Python.
-    
+
     // ------------------- legacy template function -------------------
     /// Formats the sum of two numbers as string.
     #[pyo3_stub_gen::derive::gen_stub_pyfunction()]
@@ -30,7 +30,6 @@ mod job_manager {
     fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
         Ok((a + b).to_string())
     }
-  
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -42,4 +41,3 @@ mod job_manager {
         Ok(())
     }
 }
-

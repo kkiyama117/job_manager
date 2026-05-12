@@ -88,10 +88,7 @@ mod tests {
         let r = PathResolver::new("/work");
         let u = sample_uuid();
         let j = JobId::from("post");
-        assert_eq!(
-            r.job_dir(&u, &j),
-            PathBuf::from(format!("/work/{u}/post"))
-        );
+        assert_eq!(r.job_dir(&u, &j), PathBuf::from(format!("/work/{u}/post")));
     }
 
     #[test]
