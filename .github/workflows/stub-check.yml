@@ -8,6 +8,10 @@
 # Failure mode: if regenerated .pyi differs from the committed tree, the
 # `git diff --exit-code` step fails and prints the drift, blocking the
 # release/merge until the contributor regenerates locally and commits.
+#
+# Sibling-crate checkout pattern: see .github/workflows/CI.yml header.
+# `cargo run --bin stub_gen` resolves `path = "../slurm-async-runner2"` /
+# `path = "../gaussian-job-shared2"` against this layout.
 name: stub-check
 
 on:
@@ -22,8 +26,21 @@ permissions:
 jobs:
   verify-stubs:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: job_manager
     steps:
       - uses: actions/checkout@v6
+        with:
+          path: job_manager
+      - uses: actions/checkout@v6
+        with:
+          repository: kkiyama117/slurm-async-runner
+          path: slurm-async-runner2
+      - uses: actions/checkout@v6
+        with:
+          repository: kkiyama117/gaussian_job_shared
+          path: gaussian-job-shared2
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         # rust-toolchain.toml selects nightly; this action respects it.
@@ -31,13 +48,29 @@ jobs:
 
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: job_manager
 
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
+      # Match the ruff version pinned in .pre-commit-config.yaml so the
+      # post-stub_gen formatting below produces byte-identical output to
+      # what contributors commit via pre-commit. Bump in lockstep with the
+      # `ruff-pre-commit` rev there.
+      - name: Install ruff (matches .pre-commit-config.yaml rev)
+        run: python -m pip install --quiet ruff==0.15.12
+
       - name: Regenerate pyo3-stub-gen output
         run: cargo run --quiet --bin stub_gen
+
+      # stub_gen emits single-line signatures and an extra trailing blank
+      # line; the committed .pyi files are then re-wrapped by `ruff format`
+      # via the pre-commit hook. Mirror that step here so the diff check
+      # below sees only true drift, not formatter divergence.
+      - name: Format regenerated stubs (matches pre-commit ruff-format)
+        run: ruff format python
 
       - name: Verify .pyi files are committed and unchanged
         run: |
