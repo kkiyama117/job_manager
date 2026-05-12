@@ -2,6 +2,7 @@
 # ruff: noqa: E501, F401, F403, F405
 
 import builtins
+import datetime
 import enum
 import os
 import pathlib
@@ -57,6 +58,14 @@ class SearchFilter:
     @flow_uuid_prefix.setter
     def flow_uuid_prefix(self, value: typing.Optional[builtins.str]) -> None: ...
     @property
+    def created_after(self) -> typing.Optional[datetime.datetime]: ...
+    @created_after.setter
+    def created_after(self, value: typing.Optional[datetime.datetime]) -> None: ...
+    @property
+    def created_before(self) -> typing.Optional[datetime.datetime]: ...
+    @created_before.setter
+    def created_before(self, value: typing.Optional[datetime.datetime]) -> None: ...
+    @property
     def slurm_jobid(self) -> typing.Optional[builtins.int]: ...
     @slurm_jobid.setter
     def slurm_jobid(self, value: typing.Optional[builtins.int]) -> None: ...
@@ -70,6 +79,8 @@ class SearchFilter:
         tags: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None,
         status: typing.Optional[PerJobStatus] = None,
         flow_uuid_prefix: typing.Optional[builtins.str] = None,
+        created_after: typing.Optional[datetime.datetime] = None,
+        created_before: typing.Optional[datetime.datetime] = None,
         slurm_jobid: typing.Optional[builtins.int] = None,
         job_id: typing.Optional[builtins.str] = None,
     ) -> SearchFilter: ...
