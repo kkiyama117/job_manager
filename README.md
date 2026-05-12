@@ -20,30 +20,17 @@ design rationale.
 | SLURM tick | `tick::tick_many` + `SlurmFacade` | `await job_manager.tick_many(...)` |
 | Per-Job facade | `view::CalcView` | `job_manager.CalcView` |
 
-## Layout
-
-- `src/` — Rust crate.
-- `python/job_manager/` — Python facade re-exporting the compiled
-  `_job_manager_core` extension.
-- `tests/` — Rust integration tests.
-- `python/tests/` — Python integration tests.
-
 ## Development
 
-```bash
-uv sync
-uv run maturin develop                    # build extension in-place
-cargo test --all-features                  # Rust tests
-uv run pytest python/tests -v              # Python tests
-cargo clippy --all-targets --all-features -- -D warnings
-cargo fmt --check
-```
+Read [`development.md`](./docs/development.md) — setup, build, test, lint, stub regeneration, common pitfalls.
 
-## Stub regeneration
+## Further reading
 
-```bash
-cargo run --bin stub_gen && uv run ruff format python/
-```
+See [`docs/`](./docs/README.md) for:
+- [`architecture.md`](./docs/architecture.md) — module map, on-disk
+  layout, data flow, lifecycle model.
+- `docs/superpowers/specs/` and `docs/superpowers/plans/` — design spec
+  and TDD implementation plan for each phase.
 
 ## Out of scope (deferred to SP-2 / SP-3)
 
