@@ -2,6 +2,7 @@ pub mod error;
 pub mod flow_io;
 pub mod path;
 pub mod status;
+pub mod walk;
 
 #[cfg(feature = "pyo3")]
 pub mod py_export;
