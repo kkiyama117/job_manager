@@ -1,4 +1,5 @@
 pub mod error;
+pub mod path;
 
 #[cfg(feature = "pyo3")]
 pub mod py_export;
