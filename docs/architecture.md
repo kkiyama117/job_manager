@@ -236,10 +236,10 @@ redirects D2's git-sourced SAR to the same local path so cargo treats
 ## Testing surface
 
 ```
-src/**/*.rs           — 44 unit tests in #[cfg(test)] modules
-tests/integration_walk.rs   — 100 flows enumerated under 1s
-tests/integration_tick.rs   — 3-target tick via InMemorySlurmFacade
-python/tests/test_python_api.py — 4 Python smoke tests
+src/**/*.rs                       — unit tests in #[cfg(test)] modules
+tests/integration_walk.rs         — 100 flows enumerated under 1s
+tests/integration_tick.rs         — 3-target tick via InMemorySlurmFacade
+python/tests/test_python_api.py   — Python smoke tests
 ```
 
 The `InMemorySlurmFacade` is a `pub` part of the library deliberately: it

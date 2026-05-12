@@ -84,7 +84,7 @@ cargo test --all-features && uv run pytest python/tests -v
 ### Test layout
 
 - `src/**/*.rs` — unit tests inside `#[cfg(test)] mod tests`.
-  Co-located with the code under test. Currently 44 passing.
+  Co-located with the code under test.
 - `tests/integration_walk.rs` — 100 `flow.toml` files under a tempdir,
   must complete in under 1s.
 - `tests/integration_tick.rs` — 3-target `tick_many` via
@@ -146,7 +146,8 @@ cargo llvm-cov --html          # browsable report under target/llvm-cov/html/
 cargo llvm-cov --fail-under-lines 80
 ```
 
-Current data-layer line coverage: **85.57%**.
+SP-1 ships above the 80% gate; current numbers drift with each change,
+so re-run the command above instead of trusting a checked-in figure.
 
 ## Format & lint
 
