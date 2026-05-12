@@ -8,6 +8,11 @@ use crate::slurm_facade::A1SlurmFacade;
 use crate::tick::tick_many as inner_tick_many;
 
 /// Tick a list of `(flow_uuid: str, job_id: str, slurm_jobid: int)` targets.
+///
+/// `srun_cmd` overrides the launcher binary used by A1's `SlurmManager`
+/// (defaults to `"srun"` when `None`). Useful for SSH-tunneled `sacct`
+/// or for tests that route through `"bash"` / `"true"`.
+///
 /// Returns list of dicts:
 /// `{flow_uuid, job_id, previous, new, slurm_state, slurm_reason, queried_jobid, note}`.
 /// `slurm_state` / `slurm_reason` come from the raw A1 `JobStatus`; both
@@ -19,6 +24,7 @@ pub fn tick_many<'py>(
     py: Python<'py>,
     resolver: Py<PyPathResolver>,
     targets: Vec<(String, String, u64)>,
+    srun_cmd: Option<String>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let resolver_inner: Arc<PathResolver> =
         Python::attach(|gil_py| resolver.borrow(gil_py).inner.clone());
@@ -42,7 +48,8 @@ pub fn tick_many<'py>(
             })
             .collect::<Result<_, _>>()?;
 
-        let slurm = A1SlurmFacade::new(Arc::new(slurm_async_runner::SlurmManager::new(None)));
+        let slurm_cmd = srun_cmd.map(slurm_async_runner::SlurmCmd::new);
+        let slurm = A1SlurmFacade::new(Arc::new(slurm_async_runner::SlurmManager::new(slurm_cmd)));
         let results = inner_tick_many(&parsed, &slurm, resolver_inner.as_ref()).await;
 
         Python::attach(|py| {

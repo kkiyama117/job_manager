@@ -84,5 +84,6 @@ class PerJobStatus(enum.Enum):
 def tick_many(
     resolver: PathResolver,
     targets: typing.Sequence[tuple[builtins.str, builtins.str, builtins.int]],
+    srun_cmd: typing.Optional[builtins.str] = None,
 ) -> typing.Any: ...
 def walk_flows(root: builtins.str | os.PathLike | pathlib.Path) -> typing.Any: ...
