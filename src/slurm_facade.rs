@@ -78,8 +78,10 @@ mod tests {
     #[tokio::test]
     async fn mock_returns_configured_states_for_known_jobids() {
         let mut m = HashMap::new();
-        let mut status = JobStatus::default();
-        status.state = JobState::Running;
+        let status = JobStatus {
+            state: JobState::Running,
+            ..Default::default()
+        };
         m.insert(10u64, status);
         let mock = MockSlurmFacade::new(m);
         let r = mock.query_states_batch(&[10, 11]).await.unwrap();
