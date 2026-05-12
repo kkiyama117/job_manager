@@ -52,9 +52,20 @@ slurm_async_runner = { path = "../slurm-async-runner2", default-features = false
 # OPTIONAL pyo3 stack — unchanged from skeleton
 pyo3 = { version = "0.28", features = [
   "abi3-py312",
+  # Connection to other useful crates
   "anyhow",
   "chrono",
   "experimental-inspect",
+  # NOTE: "extension-module" is intentionally NOT enabled here. Enable it
+  # per-package via `[tool.maturin] features = ["pyo3/extension-module"]`
+  # in this package's pyproject.toml. Keeping it out of the default
+  # workspace feature set lets the `stub_gen` binary link against libpython.
+  # NOTE: "auto-initialize" is intentionally NOT enabled. It conflicts
+  # with the statically-linked Python that maturin's manylinux build
+  # images ship, producing the build-script error "auto-initialize
+  # feature is enabled, but your Python installation only supports
+  # embedding the Python interpreter statically". stub_gen does not need
+  # it (abi3 dynamic linking via libpython3.so is sufficient at run time).
   "nightly",
   "serde",
 ], optional = true }
@@ -72,7 +83,7 @@ pyo3-stub-gen = { git = "https://github.com/Jij-Inc/pyo3-stub-gen", branch = "ma
 [dev-dependencies]
 tempfile = "3.10"
 rstest = "0.23"
-tokio = { version = "1.0", features = ["test-util", "macros", "rt-multi-thread"] }
+tokio = { version = "1.0", features = ["test-util"] }
 
 [features]
 default = ["pyo3", "stub_gen"]
