@@ -113,6 +113,29 @@ D2 PR (JobFlow.work_dir 撤廃のみ — newtype は保持)
 - **`JobSpec.body` と `JobSpec.config` は SP-2 時点では空** (`String::new()` / `SlurmJobConfig::default()`)。SP-3 が `plan.toml` の `params` + `common.toml` を merge して埋める
 - **JobFlow uuid は v7** (SP-1 と一貫)
 
+### 2.3 TOML ファイルと Rust 型の対応関係 (重要)
+
+SP-2 で扱う TOML には **2 種類** あり、Rust 型との結合度が異なる:
+
+| TOML | 役割 | 対応 Rust 型 | 結合方式 | 1:1 対応? |
+|---|---|---|---|---|
+| `experiment.toml` | **入力 grammar (DSL)** | (どの単一 struct とも非対応) | `crate::grammar::reader` が手動 parse して `ExperimentSource` に詰める | **❌ 非対応** |
+| `flow.toml` | **出力 (永続化)** | D2 `JobFlow` | `serde::{Serialize,Deserialize}` で round-trip (`#[serde(deny_unknown_fields)]`) | ✅ 対応 |
+| `plan.toml` | **出力 (永続化)** | `crate::plan::ExperimentPlan` | serde 直 round-trip | ✅ 対応 |
+
+**判断:**
+
+- **`experiment.toml` は DSL/grammar** であり、struct の serde 表現ではない。
+  - `values = ["a", "b"]` (scalar axis) と `values = [{...}, {...}]` (struct axis) のような shape-dependent semantics は serde derive で表せない
+  - strict unknown key 拒否、`${...}` プレースホルダ、legacy 形状検出など、custom 制約は手動 parser でのみ実装可能
+  - `ExperimentSource` / `FlowMeta` / `AxisDef` / `RawStep` / `ParentRef` は **`#[derive(Serialize, Deserialize)]` を付けない** (`Debug`, `Clone` のみ) — 内部表現が serde で漏れることを防ぐ
+- **`flow.toml` と `plan.toml` は struct のミラー**。serde で 1:1 対応するので、テスト fixture を介さず in-memory で round-trip テスト可能 (tempdir に write → read → 比較)
+- ファイル配置も分離する:
+  - `tests/fixtures/experiment/*.toml` — 入力 grammar 例 (`expand_experiment` の入力)
+  - 出力 (flow.toml / plan.toml) は in-memory round-trip テストのみ。snapshot fixture は持たない (YAGNI、struct の serde 仕様 = 出力仕様)
+
+この分離により、「TOML ファイルを見ただけで struct shape が想定できる」誤解を防ぐ。`experiment.toml` は **必ず `expand_experiment` 経由でしか読まれない**。
+
 ---
 
 ## 3. 必須 D2 変更 (`JobFlow.work_dir` 撤廃のみ)
@@ -770,7 +793,7 @@ write_plan(resolver.plan_toml(flow.uuid), plan)
 - 各 fixture (minimal / sweep / parent / multi-parent / error)
 - 例外ラップ (Rust の `JobManagerError::Grammar*` が Python 例外に変換)
 
-### 11.4 fixture (`tests/fixtures/`)
+### 11.4 fixture (`tests/fixtures/experiment/` — 入力 grammar 専用)
 
 - `minimal_step.toml`: 1 step / no sweep / no parents
 - `single_axis.toml`: 1 axis × 1 step (sweep)

@@ -96,7 +96,11 @@ src/
     └── plan.rs                  # CREATE: ExperimentPlan / PlanEntry pyclass
 
 tests/
-├── fixtures/                    # CREATE: TOML fixtures (minimal/sweep/parent/legacy/error)
+├── fixtures/
+│   └── experiment/              # CREATE: 入力 grammar (experiment.toml) 専用 — struct 非対応
+│                                #   (minimal/sweep/parent/legacy/error)
+│                                #   spec §2.3 参照。出力 (flow.toml/plan.toml) は
+│                                #   struct の serde mirror なので fixture を持たない。
 └── integration_grammar.rs       # CREATE: end-to-end tests
 
 python/
@@ -3385,11 +3389,20 @@ git commit -m "feat(api): re-export SP-2 grammar + plan public surface"
 
 ---
 
-### Task 16: tests/fixtures/ — TOML fixtures
+### Task 16: tests/fixtures/experiment/ — 入力 grammar fixtures
 
 **Files:** 多数 (下記 11 ファイル)
 
-- [ ] **Step 1: `tests/fixtures/minimal_step.toml`**
+> **注 (spec §2.3 参照):** これらは **入力 grammar (`experiment.toml`)** の例。
+> `reader.rs` が手動 parse して `ExperimentSource` に詰めるが、いずれの単一
+> Rust struct とも 1:1 対応しない (DSL/grammar)。`flow.toml` や `plan.toml` の
+> ような struct の serde 表現とは別物として扱う。
+>
+> ディレクトリ `tests/fixtures/experiment/` は **入力 grammar 専用**。出力
+> (`flow.toml` / `plan.toml`) の round-trip は in-memory (tempdir) で行うため、
+> snapshot fixture は持たない (YAGNI)。
+
+- [ ] **Step 1: `tests/fixtures/experiment/minimal_step.toml`**
 
 ```toml
 [[step]]
@@ -3397,7 +3410,7 @@ id = "opt"
 program = "g16"
 ```
 
-- [ ] **Step 2: `tests/fixtures/single_axis.toml`**
+- [ ] **Step 2: `tests/fixtures/experiment/single_axis.toml`**
 
 ```toml
 [[axis]]
@@ -3412,7 +3425,7 @@ sweep = ["compound"]
 route = "# ${compound}"
 ```
 
-- [ ] **Step 3: `tests/fixtures/pair_chain.toml`**
+- [ ] **Step 3: `tests/fixtures/experiment/pair_chain.toml`**
 
 ```toml
 [[axis]]
@@ -3431,7 +3444,7 @@ sweep = ["c"]
 parents = [{ id = "opt" }]
 ```
 
-- [ ] **Step 4: `tests/fixtures/fanout.toml`**
+- [ ] **Step 4: `tests/fixtures/experiment/fanout.toml`**
 
 ```toml
 [[axis]]
@@ -3453,7 +3466,7 @@ sweep = ["c", "m"]
 parents = [{ id = "prep", fanout = true }]
 ```
 
-- [ ] **Step 5: `tests/fixtures/reduce.toml`**
+- [ ] **Step 5: `tests/fixtures/experiment/reduce.toml`**
 
 ```toml
 [[axis]]
@@ -3475,7 +3488,7 @@ sweep = ["c"]
 parents = [{ id = "scan", reduce_over = ["m"] }]
 ```
 
-- [ ] **Step 6: `tests/fixtures/multi_parent.toml`**
+- [ ] **Step 6: `tests/fixtures/experiment/multi_parent.toml`**
 
 ```toml
 [[step]]
@@ -3495,7 +3508,7 @@ parents = [
 ]
 ```
 
-- [ ] **Step 7: `tests/fixtures/legacy_step_compounds.toml`**
+- [ ] **Step 7: `tests/fixtures/experiment/legacy_step_compounds.toml`**
 
 ```toml
 [[step]]
@@ -3504,7 +3517,7 @@ program = "g16"
 compounds = ["benzene"]
 ```
 
-- [ ] **Step 8: `tests/fixtures/legacy_step_calc_type.toml`**
+- [ ] **Step 8: `tests/fixtures/experiment/legacy_step_calc_type.toml`**
 
 ```toml
 [[step]]
@@ -3513,7 +3526,7 @@ program = "g16"
 calc_type = "opt"
 ```
 
-- [ ] **Step 9: `tests/fixtures/legacy_step_tags.toml`**
+- [ ] **Step 9: `tests/fixtures/experiment/legacy_step_tags.toml`**
 
 ```toml
 [[step]]
@@ -3522,7 +3535,7 @@ program = "g16"
 tags = { k = "v" }
 ```
 
-- [ ] **Step 10: `tests/fixtures/error_both_fanout_and_reduce.toml`**
+- [ ] **Step 10: `tests/fixtures/experiment/error_both_fanout_and_reduce.toml`**
 
 ```toml
 [[axis]]
@@ -3540,7 +3553,7 @@ program = "g16"
 parents = [{ id = "a", fanout = true, reduce_over = ["c"] }]
 ```
 
-- [ ] **Step 11: `tests/fixtures/error_dag_cycle.toml`**
+- [ ] **Step 11: `tests/fixtures/experiment/error_dag_cycle.toml`**
 
 ```toml
 [[step]]
@@ -3557,8 +3570,12 @@ parents = [{ id = "a" }]
 - [ ] **Step 12: コミット**
 
 ```bash
-git add tests/fixtures/
-git commit -m "test(grammar): TOML fixtures for integration tests"
+git add tests/fixtures/experiment/
+git commit -m "test(grammar): experiment.toml input fixtures (grammar DSL, not struct serde)
+
+入力 grammar 専用のディレクトリ tests/fixtures/experiment/ に配置。
+出力 (flow.toml / plan.toml) は struct の serde mirror なので
+in-memory round-trip で十分、snapshot fixture は持たない。"
 ```
 
 ---
@@ -3584,7 +3601,7 @@ use tempfile::tempdir;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
+        .join("tests/fixtures/experiment")
         .join(name)
 }
 
@@ -3732,7 +3749,7 @@ from job_manager import (
     write_plan,
 )
 
-FIXTURES = Path(__file__).parent.parent.parent / "tests" / "fixtures"
+FIXTURES = Path(__file__).parent.parent.parent / "tests" / "fixtures" / "experiment"
 
 
 def test_minimal_step():
