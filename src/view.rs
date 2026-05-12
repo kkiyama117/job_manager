@@ -57,6 +57,10 @@ impl<'a> CalcView<'a> {
     /// hidden files** (so `.status.toml` does not leak into the user-
     /// facing input/output listing). Returns `Ok(vec![])` if the dir does
     /// not exist. Order: sorted by filename.
+    ///
+    /// Individual `DirEntry` errors (e.g. permission denied on a single
+    /// file) are logged at WARN and the entry is skipped; an unreadable
+    /// directory still surfaces as `Err`.
     pub fn files(&self) -> Result<Vec<PathBuf>, JobManagerError> {
         let d = self.job_dir();
         if !d.exists() {
@@ -67,7 +71,13 @@ impl<'a> CalcView<'a> {
                 path: d.clone(),
                 source,
             })?
-            .filter_map(|e| e.ok())
+            .filter_map(|entry| match entry {
+                Ok(e) => Some(e),
+                Err(err) => {
+                    log::warn!("skipping dir entry in {}: {err}", d.display());
+                    None
+                }
+            })
             .map(|e| e.path())
             .filter(|p| p.is_file())
             .filter(|p| {
