@@ -55,8 +55,22 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Match the ruff version pinned in .pre-commit-config.yaml so the
+      # post-stub_gen formatting below produces byte-identical output to
+      # what contributors commit via pre-commit. Bump in lockstep with the
+      # `ruff-pre-commit` rev there.
+      - name: Install ruff (matches .pre-commit-config.yaml rev)
+        run: python -m pip install --quiet ruff==0.15.12
+
       - name: Regenerate pyo3-stub-gen output
         run: cargo run --quiet --bin stub_gen
+
+      # stub_gen emits single-line signatures and an extra trailing blank
+      # line; the committed .pyi files are then re-wrapped by `ruff format`
+      # via the pre-commit hook. Mirror that step here so the diff check
+      # below sees only true drift, not formatter divergence.
+      - name: Format regenerated stubs (matches pre-commit ruff-format)
+        run: ruff format python
 
       - name: Verify .pyi files are committed and unchanged
         run: |
