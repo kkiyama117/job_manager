@@ -405,7 +405,7 @@ mod tests {
         assert!(d.note.contains("OutOfMemory"), "note: {}", d.note);
     }
 
-    use crate::slurm_facade::MockSlurmFacade;
+    use crate::slurm_facade::InMemorySlurmFacade;
     use crate::status::io::{read_status, write_status};
     use tempfile::TempDir;
 
@@ -428,7 +428,7 @@ mod tests {
 
         let mut m = HashMap::new();
         m.insert(99u64, JobStatus::new(JobState::Running));
-        let slurm = MockSlurmFacade::new(m);
+        let slurm = InMemorySlurmFacade::new(m);
 
         let results = tick_many(&[(flow_uuid, job_id.clone(), 99)], &slurm, &resolver).await;
         assert_eq!(results.len(), 1);
@@ -458,7 +458,7 @@ mod tests {
         };
         write_status(&resolver.status_file(&flow_uuid, &job_id), &initial).unwrap();
 
-        let slurm = MockSlurmFacade::new(HashMap::new()); // no entry for 77
+        let slurm = InMemorySlurmFacade::new(HashMap::new()); // no entry for 77
         let results = tick_many(&[(flow_uuid, job_id.clone(), 77)], &slurm, &resolver).await;
         assert_eq!(results[0].previous, Some(PerJobStatus::Running));
         assert_eq!(results[0].new, Some(PerJobStatus::Running));

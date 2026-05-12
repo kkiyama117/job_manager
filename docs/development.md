@@ -88,7 +88,7 @@ cargo test --all-features && uv run pytest python/tests -v
 - `tests/integration_walk.rs` — 100 `flow.toml` files under a tempdir,
   must complete in under 1s.
 - `tests/integration_tick.rs` — 3-target `tick_many` via
-  `MockSlurmFacade`.
+  `InMemorySlurmFacade`.
 - `python/tests/test_python_api.py` — Python-side smoke tests.
 
 ### Adding tests
@@ -120,21 +120,21 @@ Parameterized tests use `rstest` (already a dev-dependency). See
 
 ### SLURM-facing tests
 
-Do **not** require a live SLURM. Use `MockSlurmFacade`:
+Do **not** require a live SLURM. Use `InMemorySlurmFacade`:
 
 ```rust
-use job_manager::{MockSlurmFacade, tick_many};
+use job_manager::{InMemorySlurmFacade, tick_many};
 use slurm_async_runner::{JobState, JobStatus};
 use std::collections::HashMap;
 
 let mut responses = HashMap::new();
 responses.insert(99u64, JobStatus::new(JobState::Running));
-let facade = MockSlurmFacade::new(responses);
+let facade = InMemorySlurmFacade::new(responses);
 let results = tick_many(&targets, &facade, &resolver).await;
 ```
 
 The mock is intentionally part of the public API (`pub use
-slurm_facade::MockSlurmFacade` in `lib.rs`) so downstream crates can use
+slurm_facade::InMemorySlurmFacade` in `lib.rs`) so downstream crates can use
 it too.
 
 ### Coverage
