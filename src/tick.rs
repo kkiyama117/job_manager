@@ -157,6 +157,7 @@ use futures::stream::{self, StreamExt};
 use gaussian_job_shared::entities::workflow::JobId;
 use uuid::Uuid;
 
+use crate::concurrency::parallelism;
 use crate::path::PathResolver;
 use crate::slurm_facade::SlurmFacade;
 use crate::status::{
@@ -176,16 +177,6 @@ pub struct TickResult {
     pub slurm_status: Option<JobStatus>,
     pub queried_jobid: Option<u64>,
     pub note: String,
-}
-
-const DEFAULT_PARALLELISM: usize = 32;
-
-fn parallelism() -> usize {
-    std::env::var("JOB_MANAGER_PARALLELISM")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT_PARALLELISM)
 }
 
 /// Per-target blocking work: read local status, decide, write if changed.
@@ -212,12 +203,9 @@ fn process_one(
     let target_lifecycle = decision.new.or(prev);
     let lifecycle_changed = decision.new.is_some() && decision.new != prev;
     let slurm_status_changed = slurm_status.as_ref() != prev_slurm;
-    let needs_write =
-        target_lifecycle.is_some() && (lifecycle_changed || slurm_status_changed);
+    let needs_write = target_lifecycle.is_some() && (lifecycle_changed || slurm_status_changed);
 
-    if needs_write
-        && let Some(lifecycle) = target_lifecycle
-    {
+    if needs_write && let Some(lifecycle) = target_lifecycle {
         let entry = StatusEntry {
             lifecycle,
             updated_at: Utc::now(),

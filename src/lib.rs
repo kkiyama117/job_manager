@@ -2,6 +2,8 @@
 //!
 //! See `docs/superpowers/specs/2026-05-12-job-manager-sp1-design.md`.
 
+mod concurrency;
+
 pub mod error;
 pub mod filter;
 pub mod flow_io;
