@@ -1,6 +1,6 @@
 use pyo3::{
     PyErr,
-    exceptions::{PyRuntimeError, PyValueError},
+    exceptions::{PyFileNotFoundError, PyRuntimeError, PyValueError},
 };
 
 use crate::error::{JobManagerError, SchemaParseError};
@@ -13,6 +13,16 @@ impl From<SchemaParseError> for PyErr {
 
 impl From<JobManagerError> for PyErr {
     fn from(value: JobManagerError) -> Self {
-        PyRuntimeError::new_err(value.to_string())
+        match &value {
+            JobManagerError::FlowNotFound { .. }
+            | JobManagerError::JobNotFound { .. }
+            | JobManagerError::StatusNotFound { .. } => {
+                PyFileNotFoundError::new_err(value.to_string())
+            }
+            JobManagerError::TomlParse { .. } | JobManagerError::TomlSer(_) => {
+                PyValueError::new_err(value.to_string())
+            }
+            _ => PyRuntimeError::new_err(value.to_string()),
+        }
     }
 }
