@@ -9,18 +9,9 @@ use async_stream::stream;
 use futures::stream::{self, Stream, StreamExt};
 use gaussian_job_shared::entities::workflow::JobFlow;
 
+use crate::concurrency::parallelism;
 use crate::error::JobManagerError;
 use crate::flow_io::read_flow;
-
-const DEFAULT_PARALLELISM: usize = 32;
-
-fn parallelism() -> usize {
-    std::env::var("JOB_MANAGER_PARALLELISM")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT_PARALLELISM)
-}
 
 /// Return paths to all candidate `flow.toml` files (synchronous; cheap).
 fn candidate_paths(root: &Path) -> Result<Vec<PathBuf>, JobManagerError> {

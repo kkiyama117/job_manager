@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
+use chrono::{DateTime, Utc};
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
@@ -14,6 +15,8 @@ pub struct PySearchFilter {
     pub tags: HashMap<String, String>,
     pub status: Option<PyPerJobStatus>,
     pub flow_uuid_prefix: Option<String>,
+    pub created_after: Option<DateTime<Utc>>,
+    pub created_before: Option<DateTime<Utc>>,
     pub slurm_jobid: Option<u64>,
     pub job_id: Option<String>,
 }
@@ -27,14 +30,19 @@ impl PySearchFilter {
         tags=None,
         status=None,
         flow_uuid_prefix=None,
+        created_after=None,
+        created_before=None,
         slurm_jobid=None,
         job_id=None,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         program: Option<String>,
         tags: Option<HashMap<String, String>>,
         status: Option<PyPerJobStatus>,
         flow_uuid_prefix: Option<String>,
+        created_after: Option<DateTime<Utc>>,
+        created_before: Option<DateTime<Utc>>,
         slurm_jobid: Option<u64>,
         job_id: Option<String>,
     ) -> Self {
@@ -43,6 +51,8 @@ impl PySearchFilter {
             tags: tags.unwrap_or_default(),
             status,
             flow_uuid_prefix,
+            created_after,
+            created_before,
             slurm_jobid,
             job_id,
         }
@@ -65,8 +75,8 @@ impl PySearchFilter {
                 .collect::<BTreeMap<_, _>>(),
             status: self.status.map(Into::into),
             flow_uuid_prefix: self.flow_uuid_prefix.clone(),
-            created_after: None,
-            created_before: None,
+            created_after: self.created_after,
+            created_before: self.created_before,
             slurm_jobid: self.slurm_jobid,
             job_id: self
                 .job_id

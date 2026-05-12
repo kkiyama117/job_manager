@@ -1,11 +1,11 @@
-//! Integration: tick_many drives status writes via MockSlurmFacade.
+//! Integration: tick_many drives status writes via InMemorySlurmFacade.
 
 use std::collections::HashMap;
 
 use chrono::Utc;
 use gaussian_job_shared::entities::workflow::JobId;
 use job_manager::path::PathResolver;
-use job_manager::slurm_facade::MockSlurmFacade;
+use job_manager::slurm_facade::InMemorySlurmFacade;
 use job_manager::status::{
     PerJobStatus, StatusEntry,
     io::{read_status, write_status},
@@ -49,7 +49,7 @@ async fn three_targets_tick_independently() {
     responses.insert(101u64, JobStatus::new(JobState::Failed));
     // 102 left unset → SLURM Unknown for this jobid
 
-    let slurm = MockSlurmFacade::new(responses);
+    let slurm = InMemorySlurmFacade::new(responses);
 
     let results = tick_many(&triples, &slurm, &resolver).await;
     assert_eq!(results.len(), 3);

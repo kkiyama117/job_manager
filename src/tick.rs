@@ -150,11 +150,14 @@ pub fn decide_transition(prev: Option<PerJobStatus>, slurm: Option<JobStatus>) -
 }
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use chrono::Utc;
+use futures::stream::{self, StreamExt};
 use gaussian_job_shared::entities::workflow::JobId;
 use uuid::Uuid;
 
+use crate::concurrency::parallelism;
 use crate::path::PathResolver;
 use crate::slurm_facade::SlurmFacade;
 use crate::status::{
@@ -176,11 +179,75 @@ pub struct TickResult {
     pub note: String,
 }
 
+/// Per-target blocking work: read local status, decide, write if changed.
+/// Runs inside `spawn_blocking` so the async executor stays free.
+///
+/// Persistence rule: write whenever the lifecycle changes OR the raw
+/// SLURM `(state, reason)` differs from what was previously persisted.
+/// The second clause keeps `slurm_status` fresh on no-op lifecycle
+/// transitions (e.g., `Failed → Failed` with a new failure reason).
+fn process_one(
+    flow_uuid: Uuid,
+    job_id: JobId,
+    slurm_jobid: u64,
+    slurm_status: Option<JobStatus>,
+    status_path: PathBuf,
+) -> TickResult {
+    let prev_entry = read_status(&status_path).ok();
+    let prev = prev_entry.as_ref().map(|e| e.lifecycle);
+    let prev_slurm = prev_entry.as_ref().and_then(|e| e.slurm_status.as_ref());
+
+    let decision = decide_transition(prev, slurm_status.clone());
+    let mut note = decision.note.clone();
+
+    let target_lifecycle = decision.new.or(prev);
+    let lifecycle_changed = decision.new.is_some() && decision.new != prev;
+    let slurm_status_changed = slurm_status.as_ref() != prev_slurm;
+    let needs_write = target_lifecycle.is_some() && (lifecycle_changed || slurm_status_changed);
+
+    if needs_write && let Some(lifecycle) = target_lifecycle {
+        let entry = StatusEntry {
+            lifecycle,
+            updated_at: Utc::now(),
+            slurm_jobid: Some(slurm_jobid),
+            slurm_status: slurm_status.clone(),
+            note: Some(decision.note.clone()),
+        };
+        if let Err(e) = write_status(&status_path, &entry) {
+            note = format!("status write failed: {e}");
+            return TickResult {
+                flow_uuid,
+                job_id,
+                previous: prev,
+                new: prev, // rolled back
+                slurm_status,
+                queried_jobid: Some(slurm_jobid),
+                note,
+            };
+        }
+    }
+
+    TickResult {
+        flow_uuid,
+        job_id,
+        previous: prev,
+        new: decision.new,
+        slurm_status,
+        queried_jobid: Some(slurm_jobid),
+        note,
+    }
+}
+
 /// For each target `(flow_uuid, job_id, slurm_jobid)`:
 /// 1. Batch-query SLURM via `slurm`.
 /// 2. Read local status (None if missing).
 /// 3. Decide transition over the full `JobStatus`.
 /// 4. Write back if changed.
+///
+/// Per-target read/decide/write runs on `spawn_blocking`, dispatched
+/// concurrently via `buffer_unordered` (mirrors `walk::walk_flows`).
+/// Output order is non-deterministic; callers that need input-order
+/// pairing should key by `(flow_uuid, job_id)`.
 pub async fn tick_many(
     targets: &[(Uuid, JobId, u64)],
     slurm: &dyn SlurmFacade,
@@ -205,52 +272,48 @@ pub async fn tick_many(
         }
     };
 
-    let mut out = Vec::with_capacity(targets.len());
-    for (flow_uuid, job_id, slurm_jobid) in targets {
-        let status_path = resolver.status_file(flow_uuid, job_id);
-        let prev_entry = read_status(&status_path).ok();
-        let prev = prev_entry.as_ref().map(|e| e.lifecycle);
-        let slurm_status = states.get(slurm_jobid).cloned();
+    // Collect owned tuples so each task has 'static lifetime independent
+    // of the input slice.
+    let owned: Vec<(Uuid, JobId, u64, Option<JobStatus>, PathBuf)> = targets
+        .iter()
+        .map(|(flow_uuid, job_id, slurm_jobid)| {
+            let status_path = resolver.status_file(flow_uuid, job_id);
+            let slurm_status = states.get(slurm_jobid).cloned();
+            (
+                *flow_uuid,
+                job_id.clone(),
+                *slurm_jobid,
+                slurm_status,
+                status_path,
+            )
+        })
+        .collect();
 
-        let decision = decide_transition(prev, slurm_status.clone());
-        let mut note = decision.note.clone();
-
-        if let Some(next) = decision.new
-            && decision.new != prev
-        {
-            let entry = StatusEntry {
-                lifecycle: next,
-                updated_at: Utc::now(),
-                slurm_jobid: Some(*slurm_jobid),
-                slurm_status: slurm_status.clone(),
-                note: Some(decision.note.clone()),
-            };
-            if let Err(e) = write_status(&status_path, &entry) {
-                note = format!("status write failed: {e}");
-                out.push(TickResult {
-                    flow_uuid: *flow_uuid,
-                    job_id: job_id.clone(),
-                    previous: prev,
-                    new: prev, // rolled back
-                    slurm_status,
-                    queried_jobid: Some(*slurm_jobid),
-                    note,
-                });
-                continue;
+    let tasks = owned.into_iter().map(
+        |(flow_uuid, job_id, slurm_jobid, slurm_status, status_path)| {
+            let job_id_fallback = job_id.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    process_one(flow_uuid, job_id, slurm_jobid, slurm_status, status_path)
+                })
+                .await
+                .unwrap_or_else(|e| TickResult {
+                    flow_uuid,
+                    job_id: job_id_fallback,
+                    previous: None,
+                    new: None,
+                    slurm_status: None,
+                    queried_jobid: Some(slurm_jobid),
+                    note: format!("spawn_blocking join error: {e}"),
+                })
             }
-        }
+        },
+    );
 
-        out.push(TickResult {
-            flow_uuid: *flow_uuid,
-            job_id: job_id.clone(),
-            previous: prev,
-            new: decision.new,
-            slurm_status,
-            queried_jobid: Some(*slurm_jobid),
-            note,
-        });
-    }
-    out
+    stream::iter(tasks)
+        .buffer_unordered(parallelism())
+        .collect()
+        .await
 }
 
 #[cfg(test)]
@@ -342,7 +405,7 @@ mod tests {
         assert!(d.note.contains("OutOfMemory"), "note: {}", d.note);
     }
 
-    use crate::slurm_facade::MockSlurmFacade;
+    use crate::slurm_facade::InMemorySlurmFacade;
     use crate::status::io::{read_status, write_status};
     use tempfile::TempDir;
 
@@ -365,7 +428,7 @@ mod tests {
 
         let mut m = HashMap::new();
         m.insert(99u64, JobStatus::new(JobState::Running));
-        let slurm = MockSlurmFacade::new(m);
+        let slurm = InMemorySlurmFacade::new(m);
 
         let results = tick_many(&[(flow_uuid, job_id.clone(), 99)], &slurm, &resolver).await;
         assert_eq!(results.len(), 1);
@@ -378,6 +441,46 @@ mod tests {
         assert_eq!(back.lifecycle, PerJobStatus::Running);
         // Raw SLURM status is now persisted, not just lifecycle.
         assert_eq!(back.slurm_status.as_ref().unwrap().state, JobState::Running);
+    }
+
+    #[tokio::test]
+    async fn tick_many_refreshes_slurm_status_on_failed_to_failed() {
+        let dir = TempDir::new().unwrap();
+        let resolver = PathResolver::new(dir.path());
+        let flow_uuid = Uuid::now_v7();
+        let job_id = JobId::from("g16");
+
+        // Seed: already Failed with OOM reason
+        let initial = StatusEntry {
+            lifecycle: PerJobStatus::Failed,
+            updated_at: Utc::now(),
+            slurm_jobid: Some(55),
+            slurm_status: Some(JobStatus::with_reason(
+                JobState::OutOfMemory,
+                JobReason::OutOfMemory,
+            )),
+            note: Some("synced: failed-terminal".into()),
+        };
+        write_status(&resolver.status_file(&flow_uuid, &job_id), &initial).unwrap();
+
+        // SLURM now reports a different failed-terminal: Timeout.
+        let mut m = HashMap::new();
+        m.insert(
+            55u64,
+            JobStatus::with_reason(JobState::Timeout, JobReason::TimeLimit),
+        );
+        let slurm = InMemorySlurmFacade::new(m);
+
+        let results = tick_many(&[(flow_uuid, job_id.clone(), 55)], &slurm, &resolver).await;
+        assert_eq!(results[0].previous, Some(PerJobStatus::Failed));
+        assert_eq!(results[0].new, Some(PerJobStatus::Failed));
+
+        // File is refreshed even though lifecycle did not change.
+        let back = read_status(&resolver.status_file(&flow_uuid, &job_id)).unwrap();
+        assert_eq!(back.lifecycle, PerJobStatus::Failed);
+        let s = back.slurm_status.as_ref().unwrap();
+        assert_eq!(s.state, JobState::Timeout);
+        assert_eq!(s.reason, JobReason::TimeLimit);
     }
 
     #[tokio::test]
@@ -395,7 +498,7 @@ mod tests {
         };
         write_status(&resolver.status_file(&flow_uuid, &job_id), &initial).unwrap();
 
-        let slurm = MockSlurmFacade::new(HashMap::new()); // no entry for 77
+        let slurm = InMemorySlurmFacade::new(HashMap::new()); // no entry for 77
         let results = tick_many(&[(flow_uuid, job_id.clone(), 77)], &slurm, &resolver).await;
         assert_eq!(results[0].previous, Some(PerJobStatus::Running));
         assert_eq!(results[0].new, Some(PerJobStatus::Running));

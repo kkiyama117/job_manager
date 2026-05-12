@@ -84,11 +84,11 @@ cargo test --all-features && uv run pytest python/tests -v
 ### Test layout
 
 - `src/**/*.rs` — unit tests inside `#[cfg(test)] mod tests`.
-  Co-located with the code under test. Currently 44 passing.
+  Co-located with the code under test.
 - `tests/integration_walk.rs` — 100 `flow.toml` files under a tempdir,
   must complete in under 1s.
 - `tests/integration_tick.rs` — 3-target `tick_many` via
-  `MockSlurmFacade`.
+  `InMemorySlurmFacade`.
 - `python/tests/test_python_api.py` — Python-side smoke tests.
 
 ### Adding tests
@@ -120,21 +120,21 @@ Parameterized tests use `rstest` (already a dev-dependency). See
 
 ### SLURM-facing tests
 
-Do **not** require a live SLURM. Use `MockSlurmFacade`:
+Do **not** require a live SLURM. Use `InMemorySlurmFacade`:
 
 ```rust
-use job_manager::{MockSlurmFacade, tick_many};
+use job_manager::{InMemorySlurmFacade, tick_many};
 use slurm_async_runner::{JobState, JobStatus};
 use std::collections::HashMap;
 
 let mut responses = HashMap::new();
 responses.insert(99u64, JobStatus::new(JobState::Running));
-let facade = MockSlurmFacade::new(responses);
+let facade = InMemorySlurmFacade::new(responses);
 let results = tick_many(&targets, &facade, &resolver).await;
 ```
 
 The mock is intentionally part of the public API (`pub use
-slurm_facade::MockSlurmFacade` in `lib.rs`) so downstream crates can use
+slurm_facade::InMemorySlurmFacade` in `lib.rs`) so downstream crates can use
 it too.
 
 ### Coverage
@@ -146,7 +146,8 @@ cargo llvm-cov --html          # browsable report under target/llvm-cov/html/
 cargo llvm-cov --fail-under-lines 80
 ```
 
-Current data-layer line coverage: **85.57%**.
+SP-1 ships above the 80% gate; current numbers drift with each change,
+so re-run the command above instead of trusting a checked-in figure.
 
 ## Format & lint
 

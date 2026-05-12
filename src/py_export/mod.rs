@@ -35,12 +35,14 @@ mod job_manager_core {
 
     #[pyo3_stub_gen::derive::gen_stub_pyfunction()]
     #[pyfunction]
+    #[pyo3(signature = (resolver, targets, srun_cmd=None))]
     fn tick_many<'py>(
         py: Python<'py>,
         resolver: Py<super::path::PyPathResolver>,
         targets: Vec<(String, String, u64)>,
+        srun_cmd: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        super::tick::tick_many(py, resolver, targets)
+        super::tick::tick_many(py, resolver, targets, srun_cmd)
     }
 
     #[pymodule_init]

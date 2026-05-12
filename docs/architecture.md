@@ -50,7 +50,7 @@ src/
 │   └── io.rs           # read_status / write_status
 ├── walk.rs             # walk_flows — async stream over <root>/*
 ├── filter.rs           # SearchFilter + matches()
-├── slurm_facade.rs     # SlurmFacade trait + A1SlurmFacade + MockSlurmFacade
+├── slurm_facade.rs     # SlurmFacade trait + A1SlurmFacade + InMemorySlurmFacade
 ├── tick.rs             # decide_transition (pure) + tick_many (orchestrator)
 ├── view.rs             # CalcView<'a> — per-Job facade
 ├── py_export/          # PyO3 surface (cfg-gated, `pyo3` feature)
@@ -101,7 +101,7 @@ Re-exported from `lib.rs`:
 | `PerJobStatus` / `StatusEntry` | enum / struct | per-Job lifecycle |
 | `walk_flows` | fn → `Stream<Item=Result<JobFlow>>` | parallel filesystem walk |
 | `SearchFilter` / `matches` | struct / fn | post-walk filter |
-| `SlurmFacade` (`A1SlurmFacade`, `MockSlurmFacade`) | trait | SLURM query abstraction |
+| `SlurmFacade` (`A1SlurmFacade`, `InMemorySlurmFacade`) | trait | SLURM query abstraction |
 | `decide_transition` / `tick_many` | fn | SLURM ↔ local reconciliation |
 | `TickResult` / `Decision` | struct | tick output |
 | `CalcView` | struct | per-Job paths + status getter |
@@ -236,13 +236,13 @@ redirects D2's git-sourced SAR to the same local path so cargo treats
 ## Testing surface
 
 ```
-src/**/*.rs           — 44 unit tests in #[cfg(test)] modules
-tests/integration_walk.rs   — 100 flows enumerated under 1s
-tests/integration_tick.rs   — 3-target tick via MockSlurmFacade
-python/tests/test_python_api.py — 4 Python smoke tests
+src/**/*.rs                       — unit tests in #[cfg(test)] modules
+tests/integration_walk.rs         — 100 flows enumerated under 1s
+tests/integration_tick.rs         — 3-target tick via InMemorySlurmFacade
+python/tests/test_python_api.py   — Python smoke tests
 ```
 
-The `MockSlurmFacade` is a `pub` part of the library deliberately: it
+The `InMemorySlurmFacade` is a `pub` part of the library deliberately: it
 lets downstream crates write deterministic tests without taking a
 fixture dependency on a live SLURM cluster.
 
