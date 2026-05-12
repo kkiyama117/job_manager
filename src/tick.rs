@@ -149,6 +149,110 @@ pub fn decide_transition(prev: Option<PerJobStatus>, slurm: Option<JobStatus>) -
     }
 }
 
+use std::collections::HashMap;
+
+use chrono::Utc;
+use gaussian_job_shared::entities::workflow::JobId;
+use uuid::Uuid;
+
+use crate::path::PathResolver;
+use crate::slurm_facade::SlurmFacade;
+use crate::status::{
+    StatusEntry,
+    io::{read_status, write_status},
+};
+
+#[derive(Debug, Clone)]
+pub struct TickResult {
+    pub flow_uuid: Uuid,
+    pub job_id: JobId,
+    pub previous: Option<PerJobStatus>,
+    pub new: Option<PerJobStatus>,
+    /// Raw SLURM `(state, reason)` last seen for this jobid. None when the
+    /// batch query did not include it (jobid expired) or when the SLURM
+    /// query itself failed.
+    pub slurm_status: Option<JobStatus>,
+    pub queried_jobid: Option<u64>,
+    pub note: String,
+}
+
+/// For each target `(flow_uuid, job_id, slurm_jobid)`:
+/// 1. Batch-query SLURM via `slurm`.
+/// 2. Read local status (None if missing).
+/// 3. Decide transition over the full `JobStatus`.
+/// 4. Write back if changed.
+pub async fn tick_many(
+    targets: &[(Uuid, JobId, u64)],
+    slurm: &dyn SlurmFacade,
+    resolver: &PathResolver,
+) -> Vec<TickResult> {
+    let jobids: Vec<u64> = targets.iter().map(|(_, _, j)| *j).collect();
+    let states: HashMap<u64, JobStatus> = match slurm.query_states_batch(&jobids).await {
+        Ok(m) => m,
+        Err(e) => {
+            return targets
+                .iter()
+                .map(|(uuid, jid, slurm_jobid)| TickResult {
+                    flow_uuid: *uuid,
+                    job_id: jid.clone(),
+                    previous: None,
+                    new: None,
+                    slurm_status: None,
+                    queried_jobid: Some(*slurm_jobid),
+                    note: format!("slurm batch query failed: {e}"),
+                })
+                .collect();
+        }
+    };
+
+    let mut out = Vec::with_capacity(targets.len());
+    for (flow_uuid, job_id, slurm_jobid) in targets {
+        let status_path = resolver.status_file(flow_uuid, job_id);
+        let prev_entry = read_status(&status_path).ok();
+        let prev = prev_entry.as_ref().map(|e| e.lifecycle);
+        let slurm_status = states.get(slurm_jobid).cloned();
+
+        let decision = decide_transition(prev, slurm_status.clone());
+        let mut note = decision.note.clone();
+
+        if let Some(next) = decision.new
+            && decision.new != prev
+        {
+            let entry = StatusEntry {
+                lifecycle: next,
+                updated_at: Utc::now(),
+                slurm_jobid: Some(*slurm_jobid),
+                slurm_status: slurm_status.clone(),
+                note: Some(decision.note.clone()),
+            };
+            if let Err(e) = write_status(&status_path, &entry) {
+                note = format!("status write failed: {e}");
+                out.push(TickResult {
+                    flow_uuid: *flow_uuid,
+                    job_id: job_id.clone(),
+                    previous: prev,
+                    new: prev, // rolled back
+                    slurm_status,
+                    queried_jobid: Some(*slurm_jobid),
+                    note,
+                });
+                continue;
+            }
+        }
+
+        out.push(TickResult {
+            flow_uuid: *flow_uuid,
+            job_id: job_id.clone(),
+            previous: prev,
+            new: decision.new,
+            slurm_status,
+            queried_jobid: Some(*slurm_jobid),
+            note,
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +340,65 @@ mod tests {
         assert_eq!(d.new, Some(PerJobStatus::Failed));
         assert!(d.note.contains("OUT_OF_MEMORY"), "note: {}", d.note);
         assert!(d.note.contains("OutOfMemory"), "note: {}", d.note);
+    }
+
+    use crate::slurm_facade::MockSlurmFacade;
+    use crate::status::io::{read_status, write_status};
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn tick_many_writes_running_for_pending_to_running() {
+        let dir = TempDir::new().unwrap();
+        let resolver = PathResolver::new(dir.path());
+        let flow_uuid = Uuid::now_v7();
+        let job_id = JobId::from("g16");
+
+        // Seed local lifecycle = Queued
+        let initial = StatusEntry {
+            lifecycle: PerJobStatus::Queued,
+            updated_at: Utc::now(),
+            slurm_jobid: Some(99),
+            slurm_status: None,
+            note: None,
+        };
+        write_status(&resolver.status_file(&flow_uuid, &job_id), &initial).unwrap();
+
+        let mut m = HashMap::new();
+        m.insert(99u64, JobStatus::new(JobState::Running));
+        let slurm = MockSlurmFacade::new(m);
+
+        let results = tick_many(&[(flow_uuid, job_id.clone(), 99)], &slurm, &resolver).await;
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        assert_eq!(r.previous, Some(PerJobStatus::Queued));
+        assert_eq!(r.new, Some(PerJobStatus::Running));
+        assert!(r.slurm_status.is_some());
+
+        let back = read_status(&resolver.status_file(&flow_uuid, &job_id)).unwrap();
+        assert_eq!(back.lifecycle, PerJobStatus::Running);
+        // Raw SLURM status is now persisted, not just lifecycle.
+        assert_eq!(back.slurm_status.as_ref().unwrap().state, JobState::Running);
+    }
+
+    #[tokio::test]
+    async fn tick_many_no_op_when_slurm_unknown_and_local_running() {
+        let dir = TempDir::new().unwrap();
+        let resolver = PathResolver::new(dir.path());
+        let flow_uuid = Uuid::now_v7();
+        let job_id = JobId::from("g16");
+        let initial = StatusEntry {
+            lifecycle: PerJobStatus::Running,
+            updated_at: Utc::now(),
+            slurm_jobid: Some(77),
+            slurm_status: None,
+            note: None,
+        };
+        write_status(&resolver.status_file(&flow_uuid, &job_id), &initial).unwrap();
+
+        let slurm = MockSlurmFacade::new(HashMap::new()); // no entry for 77
+        let results = tick_many(&[(flow_uuid, job_id.clone(), 77)], &slurm, &resolver).await;
+        assert_eq!(results[0].previous, Some(PerJobStatus::Running));
+        assert_eq!(results[0].new, Some(PerJobStatus::Running));
+        assert!(results[0].slurm_status.is_none());
     }
 }
