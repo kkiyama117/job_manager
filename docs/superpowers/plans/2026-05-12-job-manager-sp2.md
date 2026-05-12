@@ -2,48 +2,76 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `experiment.toml` → `(JobFlow, ExperimentPlan)` の Pure-Rust grammar 層を `crate::grammar::*` + `crate::plan::*` として実装する。D2 (`gaussian-job-shared2`) は **不可侵** — `JobId` / `Program` / `CalcType` / `JobFlow` / `Job` / `JobEdge` / `JobSpec` を D2 から import して使う。
+**Goal:** `experiment.toml` → `(JobFlow, ExperimentPlan)` の Pure-Rust grammar 層を `crate::grammar::*` + `crate::plan::*` として実装する。D2 (`gaussian-job-shared2`) は **newtype 不可侵** — `JobId` / `Program` / `CalcType` / `Job` / `JobEdge` / `JobSpec` を D2 から import して使う。**`JobFlow.work_dir` フィールドのみ撤廃** (redundant — `<root>/<uuid>/` で導出可)。
 
-**Architecture:** job-manager 単独の単一 PR。D2 / A1 / SP-1 既存コードへの変更なし。`grammar` モジュールに 8 ファイル、`plan` モジュールに 2 ファイル、`py_export` に 2 ファイル、`path.rs` に getter 2 つ追加、`error.rs` に Grammar* バリアント群を追加。
+**Architecture:** 3 段 PR スタック。**Phase 0** で D2 から `JobFlow.work_dir` フィールドのみを撤廃 (newtype は保持)。**Phase 1** で job-manager SP-1 コードの `flow.work_dir` 参照を `PathResolver::flow_dir(uuid)` に置換。**Phase 2** で SP-2 grammar を実装し、`expand_experiment(toml_path)` 純粋関数を公開する。
 
 **Tech Stack:** Rust 2024, PyO3 0.28 (abi3-py312), tokio 1.0, serde + toml 1.1, chrono, uuid v7, pythonize, rstest, pyo3-stub-gen。Python 3.12+, pytest, maturin, ruff。
 
-**Spec:** `docs/superpowers/specs/2026-05-12-job-manager-sp2-design.md` (v3)
+**Spec:** `docs/superpowers/specs/2026-05-12-job-manager-sp2-design.md` (v4)
 
 ---
 
-## PR Stack
+## PR Stack & 実行順序
 
 ```
+gaussian-job-shared2 repo:
+  Phase 0 PR:  refactor!: drop JobFlow.work_dir field
+               base=main, head=refactor/drop-jobflow-work-dir
+  ↓ (merged)
 job-manager repo:
-  PR:  feat(sp2): grammar layer (experiment.toml → JobFlow + plan)
-       base=main, head=feat/sp2-impl
+  Phase 1 PR:  refactor(sp1): adopt D2 v4 (drop work_dir references)
+               base=main, head=refactor/sp1-drop-work-dir
+  ↓ (merged)
+job-manager repo:
+  Phase 2 PR:  feat(sp2): grammar layer (experiment.toml → JobFlow + plan)
+               base=main, head=feat/sp2-impl
 ```
 
-D2 への変更ゼロのため単発 PR。Phase 構造も不要。
+各 Phase は前 Phase の merge を待つ。Phase 0 / Phase 1 のスコープは v2 提案より大幅に小さい (newtype 撤廃を取りやめ、work_dir のみ)。
 
 ---
 
-## D2 newtype 利用ポリシー
+## D2 利用ポリシー (newtype 保持、不要フィールドのみ撤廃)
 
-job-manager は D2 の以下の型を import して使う:
+| D2 型 / フィールド | 判定 | 用途・撤廃理由 |
+|---|---|---|
+| `JobId` newtype | **保持** | 展開後の job 識別子 (job-manager 側で再定義禁止) |
+| `Program` newtype | **保持** | step.program / JobSpec.program |
+| `CalcType` newtype | **保持** | [flow].calc_type のドメイン型 (FlowMeta で利用) |
+| `Job` / `JobEdge` / `JobSpec` | **保持** | run + search で全フィールド load-bearing |
+| `JobFlow.uuid` | **保持** | identity / search key |
+| `JobFlow.created_at` | **保持** | 時系列ソート |
+| `JobFlow.work_dir` | **Phase 0 で撤廃** | `<root>/<uuid>/` で導出可、`mv` で drift リスク |
+| `JobFlow.tags` | **保持** | search (`tags["calc_type"]` 含む) |
+| `JobFlow.jobs` | **保持** | DAG 本体 |
 
-| D2 型 | 用途 |
-|---|---|
-| `gaussian_job_shared::entities::workflow::JobId` | 展開後の job 識別子 |
-| `gaussian_job_shared::entities::workflow::Program` | step.program / JobSpec.program |
-| `gaussian_job_shared::entities::workflow::CalcType` | [flow].calc_type のドメイン型 |
-| `gaussian_job_shared::entities::workflow::JobFlow` | 出力 (work_dir 含む) |
-| `gaussian_job_shared::entities::workflow::Job` | JobFlow.jobs の値 |
-| `gaussian_job_shared::entities::workflow::JobEdge` | parents |
-| `gaussian_job_shared::entities::workflow::JobSpec` | Job.spec |
-
-これらを `String` で再定義したり別名 (`pub type ... = String`) を作ったりしてはならない。
-job-manager の `Cargo.toml` で D2 の `pyo3` feature をパス依存上で無効化する規約 (Pyclass Single Owner rule) は SP-1 と同じ。
+D2 の `pyo3` feature をパス依存上で無効化する規約 (Pyclass Single Owner rule) は SP-1 と同じ。
 
 ---
 
 ## File Structure Overview
+
+### Phase 0 (D2 repo `../gaussian-job-shared2/`)
+
+```
+src/
+├── entities/workflow.rs         # MODIFY: drop work_dir field + test fixture updates
+└── py_export/entities/workflow/
+    └── mod.rs                   # MODIFY: drop work_dir pyclass getter/setter
+```
+
+### Phase 1 (job-manager `src/`)
+
+```
+src/
+├── flow_io.rs                   # MODIFY: drop work_dir in test fixtures
+├── view.rs                      # MODIFY: flow.work_dir → resolver.flow_dir(uuid)
+├── walk.rs                      # MODIFY: drop work_dir in test fixtures
+└── (他、work_dir 参照箇所を grep で網羅)
+```
+
+### Phase 2 (job-manager `src/grammar/` + `src/plan/`)
 
 ```
 src/
@@ -78,9 +106,352 @@ python/
 
 ---
 
-# Implementation Tasks (job-manager `feat/sp2-impl` branch, base=main)
+# Phase 0: D2 PR — drop `JobFlow.work_dir` (in `../gaussian-job-shared2/`)
 
-**前提:** D2 / A1 / SP-1 既存コードは温存。ブランチを main の最新から切る。
+**Branch (in D2 repo):** `refactor/drop-jobflow-work-dir`
+**Target PR base:** `main` of `gaussian-job-shared2`
+**Scope:** `JobFlow` から `work_dir: PathBuf` フィールドを撤廃するのみ。newtype 等は一切変更しない。
+
+---
+
+### Task P0.1: D2 — ブランチ作成 + 影響範囲スキャン
+
+**Files:** none
+
+- [ ] **Step 1: D2 repo へ移動して main の状態を確認**
+
+Run: `cd ../gaussian-job-shared2 && git status && git log --oneline -3`
+
+Expected: `On branch main, working tree clean` + 直近 3 件のコミット。
+
+- [ ] **Step 2: 作業ブランチを切る**
+
+Run: `git checkout -b refactor/drop-jobflow-work-dir`
+
+- [ ] **Step 3: work_dir 参照箇所を網羅 grep**
+
+Run: `grep -rn "work_dir" src/ tests/ Cargo.toml README.md 2>/dev/null`
+
+Expected: `src/entities/workflow.rs` 内の field 定義・test、`src/py_export/entities/workflow/mod.rs` の pyclass getter/setter、README 等。すべて控える。
+
+---
+
+### Task P0.2: D2 — `JobFlow.work_dir` フィールド撤廃
+
+**Files:**
+- Modify: `src/entities/workflow.rs`
+
+- [ ] **Step 1: 失敗テスト追加** (work_dir が無くても roundtrip できる)
+
+`src/entities/workflow.rs` の `mod tests` に:
+
+```rust
+#[test]
+fn job_flow_v4_has_no_work_dir() {
+    // v4: work_dir フィールド撤廃確認。コンパイル時点で field が無いことを assert。
+    let flow = JobFlow {
+        uuid: Uuid::nil(),
+        created_at: Utc.with_ymd_and_hms(2026, 5, 12, 0, 0, 0).unwrap(),
+        tags: BTreeMap::new(),
+        jobs: BTreeMap::new(),
+    };
+    let s = toml::to_string(&flow).unwrap();
+    assert!(!s.contains("work_dir"), "TOML must not contain work_dir: {s}");
+}
+```
+
+Run: `cargo test --lib job_flow_v4_has_no_work_dir 2>&1 | tail -5`
+
+Expected: 失敗 (`work_dir: PathBuf` 必須フィールドが struct literal に無い)。
+
+- [ ] **Step 2: フィールド削除**
+
+`src/entities/workflow.rs` の `JobFlow` 定義から:
+
+```rust
+    /// Working directory: `<work_dir>/<JobId>/` is each Job's folder.
+    /// TaskManager creates these and writes the rendered `.bash` etc.
+    pub work_dir: PathBuf,
+```
+
+の 3 行を削除。`use std::path::PathBuf;` も他で使われていなければ削除。
+
+- [ ] **Step 3: 既存テストの fixture を更新**
+
+`empty_flow()` ヘルパーから `work_dir: PathBuf::from("/tmp/flow"),` 行を削除。
+`job_flow_empty_jobs_roundtrip` 内の `assert_eq!(back.work_dir, flow.work_dir);` 行を削除。
+`job_flow_duplicate_jobid_rejected_at_deserialize` の TOML literal から `work_dir = "/tmp/flow"` 行を削除。
+
+- [ ] **Step 4: テスト通過確認**
+
+Run: `cargo test --lib 2>&1 | tail -10`
+
+Expected: 全 pass。
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add src/entities/workflow.rs
+git commit -m "refactor!: drop JobFlow.work_dir field
+
+work_dir is derivable from <root>/<uuid>/ via downstream PathResolver,
+and persisting it created a drift risk on directory moves. JobFlow
+becomes a pure run/search metadata container with no location info.
+
+BREAKING: downstream code that read flow.work_dir must switch to
+PathResolver::flow_dir(&flow.uuid) (see job-manager SP-1 follow-up PR)."
+```
+
+---
+
+### Task P0.3: D2 — pyclass getter/setter 撤廃
+
+**Files:**
+- Modify: `src/py_export/entities/workflow/mod.rs`
+
+- [ ] **Step 1: pyclass の work_dir 関連を削除**
+
+`PyJobFlow` の `work_dir` getter/setter (もし `#[getter]` / `#[setter]` で work_dir を扱う method があれば) を削除。`__new__` から `work_dir` 引数も削除。
+
+- [ ] **Step 2: D2 でビルド + テスト**
+
+Run: `cargo build --all-features 2>&1 | tail -5 && cargo test --all-features 2>&1 | tail -10`
+
+Expected: 全 pass。
+
+- [ ] **Step 3: コミット**
+
+```bash
+git add src/py_export/
+git commit -m "refactor!: drop PyJobFlow work_dir getter/setter
+
+Mirrors the upstream JobFlow.work_dir removal."
+```
+
+---
+
+### Task P0.4: D2 — clippy + fmt + 全テスト
+
+- [ ] **Step 1: cargo fmt**
+
+Run: `cargo fmt && cargo fmt --check`
+
+Expected: 整形差分なし。
+
+- [ ] **Step 2: cargo clippy**
+
+Run: `cargo clippy --all-features -- -D warnings 2>&1 | tail -10`
+
+Expected: 警告 0。
+
+- [ ] **Step 3: 全テスト**
+
+Run: `cargo test --all-features 2>&1 | tail -10`
+
+Expected: 全 pass。
+
+---
+
+### Task P0.5: D2 — PR 作成
+
+- [ ] **Step 1: push + PR**
+
+```bash
+git push -u origin refactor/drop-jobflow-work-dir
+gh pr create --base main --title "refactor!: drop JobFlow.work_dir field" --body "$(cat <<'EOF'
+## Summary
+
+\`JobFlow.work_dir: PathBuf\` フィールドを撤廃する破壊的変更。
+
+## Why
+
+- 永続化値が \`<root>/<uuid>/\` 規約から導出可能 (redundant)
+- \`mv\` 等のディレクトリ移動で drift するリスクがある
+- \`JobFlow\` を run/search に純粋なメタデータコンテナとして整理 (場所情報は PathResolver に集約)
+
+## Scope
+
+- \`JobFlow\` struct から \`work_dir\` フィールドを削除
+- pyclass \`PyJobFlow\` の対応する getter/setter / \`__new__\` 引数を削除
+- 既存テスト fixture を更新
+
+newtype (\`JobId\` / \`Program\` / \`CalcType\` / etc.) は変更しない。
+
+## Migration
+
+Downstream (job-manager) 側の \`flow.work_dir\` 参照は
+\`PathResolver::flow_dir(&flow.uuid)\` 経由に置換する (別 PR で対応)。
+
+## Test plan
+
+- [ ] cargo test --all-features 通過
+- [ ] cargo clippy --all-features -- -D warnings 通過
+- [ ] cargo fmt --check 通過
+EOF
+)"
+```
+
+- [ ] **Step 2: merge 完了まで待つ** (review + CI green)
+
+- [ ] **Step 3: job-manager repo に戻る**
+
+Run: `cd ../job-manager && git status`
+
+Expected: SP-2 plan ブランチに戻り、本 plan ファイルがあること。
+
+---
+
+# Phase 1: SP-1 follow-up — `work_dir` 参照置換 (job-manager `refactor/sp1-drop-work-dir` branch, base=main)
+
+**前提:** Phase 0 PR が D2 main に merged 済み。
+**Scope:** job-manager SP-1 既存コード内の `flow.work_dir` 参照を `PathResolver::flow_dir(&flow.uuid)` 経由に置換するのみ。型 (`JobId`/`Program` 等) は変更しない。
+
+---
+
+### Task P1.1: Phase 1 — ブランチ作成 + 失敗箇所の確認
+
+**Files:** none
+
+- [ ] **Step 1: main を最新化 + Cargo.toml の D2 依存を最新版にする**
+
+```bash
+git checkout main
+git pull origin main
+# Cargo.toml の gaussian-job-shared 依存が path = "../gaussian-job-shared2"
+# になっていれば、Phase 0 merge 済みの main を反映する。tag/branch 固定なら適宜 bump。
+cargo build 2>&1 | tail -10
+```
+
+Expected: ビルドが work_dir 関連で失敗 — 失敗メッセージが Phase 1 の作業対象。
+
+- [ ] **Step 2: 作業ブランチ**
+
+Run: `git checkout -b refactor/sp1-drop-work-dir`
+
+- [ ] **Step 3: work_dir 参照箇所を grep**
+
+Run: `grep -rn "work_dir\|\.work_dir" src/ tests/ python/ 2>/dev/null`
+
+Expected: SP-1 既存コード (`view.rs` / `flow_io.rs` test fixture / `walk.rs` test fixture / 他) で参照箇所がリストされる。
+
+---
+
+### Task P1.2: Phase 1 — work_dir 参照を `PathResolver::flow_dir(&uuid)` に置換
+
+**Files:**
+- Modify: `src/view.rs`
+- Modify: `src/flow_io.rs` (test fixture)
+- Modify: `src/walk.rs` (test fixture)
+- Modify: 他、grep で見つかった箇所すべて
+
+- [ ] **Step 1: `src/view.rs` の `flow.work_dir` 参照を置換**
+
+`flow.work_dir.join(...)` 形式の使用箇所を `resolver.flow_dir(&flow.uuid).join(...)` または同等表現に置換。`PathResolver` インスタンスが API 経由で渡されていない場合は、関数シグネチャに `resolver: &PathResolver` を追加するのではなく `root: &Path` を取り `root.join(uuid.to_string())` で十分なら最小修正に留める (call site が増えるなら resolver 受け取る方が一貫)。
+
+- [ ] **Step 2: `src/flow_io.rs` の test fixture**
+
+`JobFlow { ... work_dir: ..., ... }` の struct literal から `work_dir: ...` 行を削除。期待 TOML から `work_dir = "..."` 行を削除。
+
+- [ ] **Step 3: `src/walk.rs` の test fixture**
+
+同上。
+
+- [ ] **Step 4: 残り参照箇所**
+
+Task P1.1 Step 3 の grep 結果すべてを上記方針で置換。`PathBuf` import が不要になったファイルは整理。
+
+- [ ] **Step 5: ビルド確認**
+
+Run: `cargo build 2>&1 | tail -10`
+
+Expected: 成功 (work_dir 参照ゼロ)。
+
+- [ ] **Step 6: 全テスト**
+
+Run: `cargo test --all-features 2>&1 | tail -10`
+
+Expected: 全 pass。
+
+- [ ] **Step 7: コミット**
+
+```bash
+git add src/
+git commit -m "refactor(sp1): drop work_dir references after D2 v4 PR
+
+D2 から JobFlow.work_dir が撤廃されたため、SP-1 内で flow.work_dir を
+参照していた箇所を PathResolver::flow_dir(&flow.uuid) ベースに置換。
+機能変更なし、型変更なし。"
+```
+
+---
+
+### Task P1.3: Phase 1 — stub 再生成 + fmt/clippy
+
+- [ ] **Step 1: stub_gen**
+
+Run: `cargo run --bin stub_gen --features stub_gen 2>&1 | tail -5 && uv run ruff format python/job_manager/_job_manager_core/__init__.pyi`
+
+Expected: `.pyi` から PyJobFlow の work_dir エントリが消えていることを diff で確認。
+
+- [ ] **Step 2: cargo fmt + clippy**
+
+Run: `cargo fmt && cargo clippy --all-features -- -D warnings 2>&1 | tail -10`
+
+Expected: 警告 0、整形差分なし。
+
+- [ ] **Step 3: Python テスト**
+
+Run: `uv run maturin develop 2>&1 | tail -3 && uv run pytest python/tests 2>&1 | tail -10`
+
+Expected: 全 pass。SP-1 テストが work_dir 不在で壊れていれば修正。
+
+- [ ] **Step 4: コミット (stub のみ)**
+
+```bash
+git add python/job_manager/_job_manager_core/__init__.pyi
+git commit -m "chore(stubs): regenerate .pyi after work_dir removal"
+```
+
+---
+
+### Task P1.4: Phase 1 — PR 作成
+
+- [ ] **Step 1: push + PR**
+
+```bash
+git push -u origin refactor/sp1-drop-work-dir
+gh pr create --base main --title "refactor(sp1): adopt D2 v4 (drop JobFlow.work_dir references)" --body "$(cat <<'EOF'
+## Summary
+
+D2 v4 (\`refactor!: drop JobFlow.work_dir field\`) merge を追跡し、
+job-manager SP-1 既存コード内の \`flow.work_dir\` 参照を
+\`PathResolver::flow_dir(&flow.uuid)\` 経由に置換する。
+
+## Scope
+
+- 機能変更なし
+- 型変更なし (JobId / Program / CalcType / 他は不変)
+- work_dir 参照のみ置換
+- test fixture の \`work_dir: ...\` 行を削除
+- 再生成済み \`.pyi\` を含む
+
+## Test plan
+
+- [ ] cargo test --all-features 通過
+- [ ] cargo clippy --all-features -- -D warnings 通過
+- [ ] uv run pytest python/tests 通過
+EOF
+)"
+```
+
+- [ ] **Step 2: merge 完了まで待つ**
+
+---
+
+# Phase 2: SP-2 grammar (job-manager `feat/sp2-impl` branch, base=main)
+
+**前提:** Phase 0 (D2 v4 PR) と Phase 1 (SP-1 follow-up) が main にマージ済み。
+**Scope:** SP-2 grammar 実装本体。
 
 ---
 
@@ -296,7 +667,7 @@ git commit -m "feat(error): add SP-2 GrammarError variants
 
 src/error.rs に grammar / legacy / validation / placeholder / DAG
 cycle 用 variant を追加。py_export/error.rs で PyValueError マッピング。
-SP-2 spec §8.3 に対応。"
+SP-2 spec §9.3 に対応。"
 ```
 
 ---
@@ -419,7 +790,7 @@ Expected: `test result: ok`.
 git add src/grammar/ src/lib.rs
 git commit -m "feat(grammar): add data types (ExperimentSource/AxisDef/RawStep/ParentRef)
 
-SP-2 spec §8.2 source.rs に対応。データ構造のみ、I/O やロジックは
+SP-2 spec §9.2 source.rs に対応。データ構造のみ、I/O やロジックは
 後続タスクで追加。"
 ```
 
@@ -696,7 +1067,7 @@ git add src/grammar/
 git commit -m "feat(grammar): placeholder lexer + recursive expander
 
 \${name} と \${name.field} の 1-pass scanner、\$\$ escape、配列・テーブル
-ネストを再帰展開。SP-2 spec §3.5 に対応。"
+ネストを再帰展開。SP-2 spec §4.5 に対応。"
 ```
 
 ---
@@ -878,7 +1249,7 @@ Expected: `test result: ok. 6 passed`.
 git add src/grammar/
 git commit -m "feat(grammar): jobid validate/build/parse helpers
 
-SP-2 spec §4 に対応。"
+SP-2 spec §5 に対応。"
 ```
 
 ---
@@ -1649,7 +2020,7 @@ Expected: `test result: ok. 16 passed`.
 git add src/grammar/
 git commit -m "feat(grammar): TOML strict parser + legacy detection
 
-SP-2 spec §3 に対応。"
+SP-2 spec §4 に対応。"
 ```
 
 ---
@@ -1896,7 +2267,7 @@ Expected: `test result: ok. 4 passed`.
 git add src/grammar/
 git commit -m "feat(grammar): sweep expansion with placeholder substitution
 
-SP-2 spec §5 に対応。"
+SP-2 spec §6 に対応。"
 ```
 
 ---
@@ -2348,7 +2719,7 @@ Expected: `test result: ok. 10 passed`.
 git add src/grammar/
 git commit -m "feat(grammar): parent resolution (pair/fanout/reduce) + DAG cycle check
 
-SP-2 spec §6 に対応。"
+SP-2 spec §7 に対応。"
 ```
 
 ---
@@ -2471,7 +2842,7 @@ git add src/plan/ src/lib.rs
 git commit -m "feat(plan): ExperimentPlan + atomic rename I/O
 
 最小構造 BTreeMap<JobId, BTreeMap<String, toml::Value>>。
-SP-2 spec §7.2 に対応。"
+SP-2 spec §8.2 に対応。"
 ```
 
 ---
@@ -2488,9 +2859,9 @@ SP-2 spec §7.2 に対応。"
 
 ```rust
 //! ResolvedStep → (JobFlow, ExperimentPlan).
+//! v4: Phase 0 で D2 から JobFlow.work_dir が撤廃されるため root 引数不要。
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use chrono::Utc;
 use gaussian_job_shared::entities::workflow::{Job, JobFlow, JobSpec};
@@ -2505,7 +2876,6 @@ use crate::plan::ExperimentPlan;
 pub(crate) fn to_jobflow_and_plan(
     flow_meta: &FlowMeta,
     resolved: Vec<ResolvedStep>,
-    root: &Path,                                    // v3: work_dir 導出のため
 ) -> Result<(JobFlow, ExperimentPlan), JobManagerError> {
     let mut tags = flow_meta.tags.clone();
     if let Some(ct) = &flow_meta.calc_type {
@@ -2527,11 +2897,9 @@ pub(crate) fn to_jobflow_and_plan(
         plan_jobs.insert(r.job_id, r.params);
     }
 
-    let uuid = Uuid::now_v7();
     let flow = JobFlow {
-        uuid,
+        uuid: Uuid::now_v7(),
         created_at: Utc::now(),
-        work_dir: root.join(uuid.to_string()),     // v3: D2 既存 work_dir フィールドを root から導出
         tags,
         jobs,
     };
@@ -2551,7 +2919,7 @@ mod tests {
         let parsed = parse_experiment_str(src, &PathBuf::from("/tmp/x.toml"))?;
         let expanded = expand_sweeps(&parsed)?;
         let resolved = resolve_parents(&parsed, expanded)?;
-        to_jobflow_and_plan(&parsed.flow, resolved, &PathBuf::from("/tmp/root"))
+        to_jobflow_and_plan(&parsed.flow, resolved)
     }
 
     #[test]
@@ -2559,14 +2927,6 @@ mod tests {
         let s = "[[step]]\nid = \"opt\"\nprogram = \"g16\"\n";
         let (flow, _) = pipeline(s).unwrap();
         assert_eq!(flow.uuid.get_version_num(), 7);
-    }
-
-    #[test]
-    fn flow_work_dir_is_root_plus_uuid() {
-        let s = "[[step]]\nid = \"opt\"\nprogram = \"g16\"\n";
-        let (flow, _) = pipeline(s).unwrap();
-        let expected = PathBuf::from("/tmp/root").join(flow.uuid.to_string());
-        assert_eq!(flow.work_dir, expected);
     }
 
     #[test]
@@ -2636,7 +2996,7 @@ Expected: `test result: ok. 3 passed`.
 git add src/grammar/
 git commit -m "feat(grammar): build JobFlow + ExperimentPlan from resolved steps
 
-SP-2 spec §7 に対応。"
+SP-2 spec §8 に対応。"
 ```
 
 ---
@@ -2657,17 +3017,12 @@ use crate::error::JobManagerError;
 use crate::plan::ExperimentPlan;
 
 /// `experiment.toml` → `(JobFlow, ExperimentPlan)`。
-///
-/// `root` は `JobFlow.work_dir = root.join(uuid.to_string())` のため。
-/// ディスクへの書き込みは呼び側責務。
-pub fn expand_experiment(
-    toml_path: &Path,
-    root: &Path,
-) -> Result<(JobFlow, ExperimentPlan), JobManagerError> {
+/// pure (toml_path 読込のみ、ディスク書き込みは呼び側責務)。
+pub fn expand_experiment(toml_path: &Path) -> Result<(JobFlow, ExperimentPlan), JobManagerError> {
     let src = reader::parse_experiment(toml_path)?;
     let expanded = sweep::expand_sweeps(&src)?;
     let resolved = chain::resolve_parents(&src, expanded)?;
-    build::to_jobflow_and_plan(&src.flow, resolved, root)
+    build::to_jobflow_and_plan(&src.flow, resolved)
 }
 
 #[cfg(test)]
@@ -2675,7 +3030,7 @@ mod pipeline_tests {
     use super::*;
     use gaussian_job_shared::entities::workflow::JobId;
     use std::io::Write;
-    use tempfile::{tempdir, NamedTempFile};
+    use tempfile::NamedTempFile;
 
     #[test]
     fn pipeline_end_to_end() {
@@ -2700,8 +3055,7 @@ route = "# ${{c}}"
 "#
         )
         .unwrap();
-        let root = tempdir().unwrap();
-        let (flow, plan) = expand_experiment(f.path(), root.path()).unwrap();
+        let (flow, plan) = expand_experiment(f.path()).unwrap();
         assert_eq!(flow.tags["calc_type"], "opt");
         assert_eq!(flow.tags["project"], "x");
         assert!(flow.jobs.contains_key(&JobId::from("opt__c=0")));
@@ -2709,7 +3063,6 @@ route = "# ${{c}}"
             plan.jobs[&JobId::from("opt__c=0")]["route"].as_str().unwrap(),
             "# benzene"
         );
-        assert_eq!(flow.work_dir, root.path().join(flow.uuid.to_string()));
     }
 }
 ```
@@ -2726,7 +3079,7 @@ Expected: `test result: ok`.
 git add src/grammar/mod.rs
 git commit -m "feat(grammar): expose expand_experiment pipeline
 
-SP-2 spec §8.2 public API に対応。"
+SP-2 spec §9.2 public API に対応。"
 ```
 
 ---
@@ -2879,7 +3232,7 @@ Expected: 成功。
 git add src/py_export/plan.rs
 git commit -m "feat(py): PyExperimentPlan + read_plan/write_plan pyfunctions
 
-SP-2 spec §9 に対応。"
+SP-2 spec §10 に対応。"
 ```
 
 ---
@@ -2912,14 +3265,12 @@ use crate::py_export::plan::PyExperimentPlan;
 pub(crate) fn expand_experiment(
     py: Python<'_>,
     toml_path: PathBuf,
-    root: PathBuf,
 ) -> PyResult<(PyObject, PyExperimentPlan)> {
     let (flow, plan) =
-        grammar::expand_experiment(&toml_path, &root).map_err(crate::py_export::error::to_py_err)?;
-    // JobFlow は D2 の構造体。pythonize で Python dict 化して返す。
-    // (D2 が pyclass を所有しているが、SP-2 内で D2 pyclass を直接構築する API は持たない。
-    //  consumer は dict として受け取り、必要なら gaussian_job_shared が用意する from_dict
-    //  相当 API を使う想定。)
+        grammar::expand_experiment(&toml_path).map_err(crate::py_export::error::to_py_err)?;
+    // JobFlow は D2 の構造体 (v4: work_dir 撤廃後)。pythonize で Python dict 化して返す。
+    // consumer は dict として受け取り、必要なら gaussian_job_shared が用意する from_dict
+    // 相当 API を使う想定。
     let flow_py: Bound<'_, PyAny> = pythonize::pythonize(py, &flow)?;
     Ok((flow_py.unbind(), PyExperimentPlan { inner: plan }))
 }
@@ -2972,7 +3323,7 @@ git add src/py_export/
 git commit -m "feat(py): expand_experiment + parse_job_id pyfunctions
 
 JobFlow は pythonize 経由で Python dict として返す。
-SP-2 spec §9 に対応。"
+SP-2 spec §10 に対応。"
 ```
 
 ---
@@ -3223,12 +3574,13 @@ git commit -m "test(grammar): TOML fixtures for integration tests"
 
 ```rust
 //! Integration tests for the SP-2 grammar pipeline.
+//! v4: D2 から work_dir 撤廃後、`expand_experiment` は toml_path のみ。
 
 use std::path::{Path, PathBuf};
 
 use gaussian_job_shared::entities::workflow::JobId;
 use job_manager::{expand_experiment, parse_job_id, read_plan, write_plan};
-use tempfile::{tempdir, TempDir};
+use tempfile::tempdir;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3236,14 +3588,9 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn root_tempdir() -> TempDir {
-    tempdir().unwrap()
-}
-
 #[test]
 fn minimal_step_yields_single_job() {
-    let root = root_tempdir();
-    let (flow, plan) = expand_experiment(&fixture("minimal_step.toml"), root.path()).unwrap();
+    let (flow, plan) = expand_experiment(&fixture("minimal_step.toml")).unwrap();
     assert_eq!(flow.jobs.len(), 1);
     assert!(flow.jobs.contains_key(&JobId::from("opt")));
     assert!(plan.jobs.contains_key(&JobId::from("opt")));
@@ -3251,8 +3598,7 @@ fn minimal_step_yields_single_job() {
 
 #[test]
 fn single_axis_expands_to_3_jobs() {
-    let root = root_tempdir();
-    let (flow, plan) = expand_experiment(&fixture("single_axis.toml"), root.path()).unwrap();
+    let (flow, plan) = expand_experiment(&fixture("single_axis.toml")).unwrap();
     assert_eq!(flow.jobs.len(), 3);
     assert_eq!(plan.jobs.len(), 3);
     let route0 = plan.jobs[&JobId::from("opt__compound=0")]["route"]
@@ -3263,8 +3609,7 @@ fn single_axis_expands_to_3_jobs() {
 
 #[test]
 fn pair_chain_creates_1_to_1_edges() {
-    let root = root_tempdir();
-    let (flow, _) = expand_experiment(&fixture("pair_chain.toml"), root.path()).unwrap();
+    let (flow, _) = expand_experiment(&fixture("pair_chain.toml")).unwrap();
     let freq_jobs: Vec<_> = flow
         .jobs
         .iter()
@@ -3278,8 +3623,7 @@ fn pair_chain_creates_1_to_1_edges() {
 
 #[test]
 fn fanout_creates_1_to_n_edges() {
-    let root = root_tempdir();
-    let (flow, _) = expand_experiment(&fixture("fanout.toml"), root.path()).unwrap();
+    let (flow, _) = expand_experiment(&fixture("fanout.toml")).unwrap();
     let opt_jobs: Vec<_> = flow
         .jobs
         .iter()
@@ -3293,8 +3637,7 @@ fn fanout_creates_1_to_n_edges() {
 
 #[test]
 fn reduce_creates_n_to_1_edges() {
-    let root = root_tempdir();
-    let (flow, _) = expand_experiment(&fixture("reduce.toml"), root.path()).unwrap();
+    let (flow, _) = expand_experiment(&fixture("reduce.toml")).unwrap();
     let compare: Vec<_> = flow
         .jobs
         .iter()
@@ -3307,8 +3650,7 @@ fn reduce_creates_n_to_1_edges() {
 #[test]
 fn multi_parent_with_mixed_kinds() {
     use slurm_async_runner::entities::slurm::DependencyType;
-    let root = root_tempdir();
-    let (flow, _) = expand_experiment(&fixture("multi_parent.toml"), root.path()).unwrap();
+    let (flow, _) = expand_experiment(&fixture("multi_parent.toml")).unwrap();
     let merge = flow.jobs.get(&JobId::from("merge")).unwrap();
     assert_eq!(merge.parents.len(), 2);
     let kinds: Vec<DependencyType> = merge.parents.iter().map(|e| e.kind).collect();
@@ -3318,22 +3660,19 @@ fn multi_parent_with_mixed_kinds() {
 
 #[test]
 fn legacy_step_compounds_errors() {
-    let root = root_tempdir();
-    let e = expand_experiment(&fixture("legacy_step_compounds.toml"), root.path()).unwrap_err();
+    let e = expand_experiment(&fixture("legacy_step_compounds.toml")).unwrap_err();
     assert!(matches!(e, job_manager::JobManagerError::LegacyToml { .. }));
 }
 
 #[test]
 fn dag_cycle_detected() {
-    let root = root_tempdir();
-    let e = expand_experiment(&fixture("error_dag_cycle.toml"), root.path()).unwrap_err();
+    let e = expand_experiment(&fixture("error_dag_cycle.toml")).unwrap_err();
     assert!(matches!(e, job_manager::JobManagerError::DagHasCycle(_)));
 }
 
 #[test]
 fn plan_toml_round_trip() {
-    let root = root_tempdir();
-    let (_, plan) = expand_experiment(&fixture("single_axis.toml"), root.path()).unwrap();
+    let (_, plan) = expand_experiment(&fixture("single_axis.toml")).unwrap();
     let dir = tempdir().unwrap();
     let path = dir.path().join("plan.toml");
     write_plan(&path, &plan).unwrap();
@@ -3343,19 +3682,11 @@ fn plan_toml_round_trip() {
 
 #[test]
 fn parse_job_id_round_trip_via_grammar() {
-    let root = root_tempdir();
-    let (flow, _) = expand_experiment(&fixture("fanout.toml"), root.path()).unwrap();
+    let (flow, _) = expand_experiment(&fixture("fanout.toml")).unwrap();
     for job_id in flow.jobs.keys() {
         let parts = parse_job_id(&job_id.0).unwrap();
         assert!(!parts.source_step_id.is_empty());
     }
-}
-
-#[test]
-fn flow_work_dir_is_under_root() {
-    let root = root_tempdir();
-    let (flow, _) = expand_experiment(&fixture("minimal_step.toml"), root.path()).unwrap();
-    assert_eq!(flow.work_dir, root.path().join(flow.uuid.to_string()));
 }
 ```
 
@@ -3363,7 +3694,7 @@ fn flow_work_dir_is_under_root() {
 
 Run: `cargo test --test integration_grammar 2>&1 | tail -10`
 
-Expected: `test result: ok. 11 passed`.
+Expected: `test result: ok. 10 passed`.
 
 - [ ] **Step 3: コミット**
 
@@ -3404,15 +3735,15 @@ from job_manager import (
 FIXTURES = Path(__file__).parent.parent.parent / "tests" / "fixtures"
 
 
-def test_minimal_step(tmp_path):
-    flow, plan = expand_experiment(str(FIXTURES / "minimal_step.toml"), str(tmp_path))
+def test_minimal_step():
+    flow, plan = expand_experiment(str(FIXTURES / "minimal_step.toml"))
     # flow は pythonize 経由の dict (key は JobId の内部 String 表現)
     assert "opt" in flow["jobs"]
     assert "opt" in plan.jobs
 
 
-def test_single_axis_expands_3_jobs(tmp_path):
-    _, plan = expand_experiment(str(FIXTURES / "single_axis.toml"), str(tmp_path))
+def test_single_axis_expands_3_jobs():
+    _, plan = expand_experiment(str(FIXTURES / "single_axis.toml"))
     assert len(plan.jobs) == 3
     assert plan.jobs["opt__compound=0"]["route"] == "# benzene"
 
@@ -3434,18 +3765,18 @@ def test_invalid_job_id_raises():
         parse_job_id("opt__compound=abc")
 
 
-def test_legacy_compounds_raises(tmp_path):
+def test_legacy_compounds_raises():
     with pytest.raises(ValueError):
-        expand_experiment(str(FIXTURES / "legacy_step_compounds.toml"), str(tmp_path))
+        expand_experiment(str(FIXTURES / "legacy_step_compounds.toml"))
 
 
-def test_dag_cycle_raises(tmp_path):
+def test_dag_cycle_raises():
     with pytest.raises(ValueError):
-        expand_experiment(str(FIXTURES / "error_dag_cycle.toml"), str(tmp_path))
+        expand_experiment(str(FIXTURES / "error_dag_cycle.toml"))
 
 
-def test_plan_round_trip(tmp_path):
-    _, plan = expand_experiment(str(FIXTURES / "single_axis.toml"), str(tmp_path))
+def test_plan_round_trip():
+    _, plan = expand_experiment(str(FIXTURES / "single_axis.toml"))
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "plan.toml"
         write_plan(str(p), plan)
@@ -3453,11 +3784,10 @@ def test_plan_round_trip(tmp_path):
         assert len(back.jobs) == len(plan.jobs)
 
 
-def test_flow_work_dir_under_root(tmp_path):
-    flow, _ = expand_experiment(str(FIXTURES / "minimal_step.toml"), str(tmp_path))
-    # JobFlow.work_dir = root / uuid。pythonize 経由で文字列化されている。
-    assert str(tmp_path) in flow["work_dir"]
-    assert flow["uuid"] in flow["work_dir"]
+def test_jobflow_has_no_work_dir():
+    """v4: D2 から work_dir 撤廃後、pythonize 結果にも work_dir キーは無い。"""
+    flow, _ = expand_experiment(str(FIXTURES / "minimal_step.toml"))
+    assert "work_dir" not in flow
 ```
 
 - [ ] **Step 2: maturin で Python パッケージを再ビルド**
@@ -3518,7 +3848,7 @@ Expected: ≥ 80%。不足するモジュールがあれば該当タスクに戻
 ```markdown
 ## SP-2 (grammar) capabilities
 
-- `expand_experiment(toml_path, root)` — `experiment.toml` を解析・展開して `(JobFlow, ExperimentPlan)` を返す純粋関数 (`root` は `JobFlow.work_dir` 導出用)
+- `expand_experiment(toml_path)` — `experiment.toml` を解析・展開して `(JobFlow, ExperimentPlan)` を返す純粋関数
 - `[[axis]]` で sweep 軸を宣言 (scalar/struct)、`[[step]]` で sweep + parents 指定
 - parent 解決の 3 mode (pair_by_axes / fanout / reduce_over) と SLURM `DependencyType` per-edge 指定
 - `${axis}` / `${axis.field}` プレースホルダ展開 (`$$` エスケープ)
@@ -3553,13 +3883,14 @@ git push -u origin feat/sp2-impl
 gh pr create --base main --title "feat(sp2): grammar layer (experiment.toml → JobFlow + plan)" --body "$(cat <<'EOF'
 ## Summary
 
-SP-2 grammar 実装。\`expand_experiment(path, root)\` を純粋関数として公開し、experiment.toml から (JobFlow, ExperimentPlan) を構築する。
+SP-2 grammar 実装。\`expand_experiment(path)\` を純粋関数として公開し、experiment.toml から (JobFlow, ExperimentPlan) を構築する。
 
 ## 前提
 
-- D2 (\`gaussian-job-shared2\`) / A1 (\`slurm-async-runner2\`) は不可侵
-- SP-1 既存コードへの変更なし
-- D2 の \`JobId\` / \`Program\` / \`CalcType\` を import して使う
+- D2 (\`gaussian-job-shared2\`) の \`JobFlow.work_dir\` 撤廃 PR が merged
+- SP-1 follow-up PR (work_dir 参照を PathResolver 経由に置換) が merged
+- A1 (\`slurm-async-runner2\`) は不可侵
+- D2 newtype (\`JobId\` / \`Program\` / \`CalcType\`) は保持・import 利用
 
 ## 主な追加
 
@@ -3571,7 +3902,7 @@ SP-2 grammar 実装。\`expand_experiment(path, root)\` を純粋関数として
 
 ## 設計
 
-詳細は spec v3 (\`docs/superpowers/specs/2026-05-12-job-manager-sp2-design.md\`) を参照。
+詳細は spec v4 (\`docs/superpowers/specs/2026-05-12-job-manager-sp2-design.md\`) を参照。
 
 ## Test plan
 
@@ -3593,18 +3924,18 @@ EOF
 ## Capabilities (SP-2 完了時)
 
 ```
-job_manager::expand_experiment(path, root) -> Result<(JobFlow, ExperimentPlan), JobManagerError>
-job_manager::parse_job_id(&JobId) -> Result<JobIdParts<'_>, JobManagerError>
+job_manager::expand_experiment(path) -> Result<(JobFlow, ExperimentPlan), JobManagerError>
+job_manager::parse_job_id(s) -> Result<JobIdParts<'_>, JobManagerError>
 job_manager::build_job_id(step, combo) -> String
-job_manager::validate_step_id(s) -> Result<(), JobManagerError>
-job_manager::validate_job_id(s) -> Result<(), JobManagerError>
+job_manager::validate_step_id(s) -> Result<&str, JobManagerError>
+job_manager::validate_job_id(s) -> Result<&str, JobManagerError>
 job_manager::read_plan(path) -> Result<ExperimentPlan, JobManagerError>
 job_manager::write_plan(path, &plan) -> Result<(), JobManagerError>
 job_manager::PathResolver::plan_toml(&uuid) -> PathBuf
 job_manager::PathResolver::experiment_toml(&uuid) -> PathBuf
 ```
 
-D2 から import:
+D2 から import (v4: work_dir 撤廃後の JobFlow):
 
 ```
 gaussian_job_shared::entities::workflow::{JobId, Program, CalcType, JobFlow, Job, JobEdge, JobSpec};
@@ -3632,40 +3963,41 @@ from job_manager import expand_experiment, parse_job_id, ExperimentPlan, read_pl
 
 ### Spec coverage check
 
-spec (v3) の各セクションに対応するタスク:
+spec (v4) の各セクションに対応するタスク:
 
 | Spec section | Task |
 |---|---|
 | §1 背景 | 説明のみ |
 | §2 採用アプローチ | 全タスク |
-| §3.1 全体構造 | Task 6 (reader) |
-| §3.2 [flow] block | Task 6 (`parse_flow_block`) |
-| §3.3 [[axis]] block | Task 6 (`parse_axes` / `parse_axis_values`) |
-| §3.4 [[step]] block | Task 6 (`parse_steps`) |
-| §3.4.1 step.parents | Task 6 (`parse_parents`) |
-| §3.4.2 Legacy 検出 | Task 6 + Task 16 fixtures |
-| §3.5 Placeholder | Task 4 |
-| §4 JobId 命名 | Task 5 |
-| §5 Sweep 展開 | Task 7 |
-| §6 Parent 解決 | Task 8 |
-| §7.1 JobFlow 出力 | Task 10 |
-| §7.2 ExperimentPlan | Task 9 + Task 10 |
-| §7.3 FS レイアウト | Task 12 |
-| §8 Rust モジュール | Task 3-12 全体 |
-| §9 Python API | Task 13 + Task 14 + Task 15 |
-| §10 テスト計画 | Task 16-18 |
-| §11 リスク | 各タスクで mitigate |
-| §12 完了基準 | Task 19 で確認 |
+| §3 必須 D2 変更 (work_dir 撤廃) | Phase 0 (Task P0.1-P0.5) + Phase 1 (Task P1.1-P1.4) |
+| §4.1 全体構造 | Task 6 (reader) |
+| §4.2 [flow] block | Task 6 (`parse_flow_block`) |
+| §4.3 [[axis]] block | Task 6 (`parse_axes` / `parse_axis_values`) |
+| §4.4 [[step]] block | Task 6 (`parse_steps`) |
+| §4.4.1 step.parents | Task 6 (`parse_parents`) |
+| §4.4.2 Legacy 検出 | Task 6 + Task 16 fixtures |
+| §4.5 Placeholder | Task 4 |
+| §5 JobId 命名 | Task 5 |
+| §6 Sweep 展開 | Task 7 |
+| §7 Parent 解決 | Task 8 |
+| §8.1 JobFlow 出力 | Task 10 |
+| §8.2 ExperimentPlan | Task 9 + Task 10 |
+| §8.3 FS レイアウト | Task 12 |
+| §9 Rust モジュール | Task 3-12 全体 |
+| §10 Python API | Task 13 + Task 14 + Task 15 |
+| §11 テスト計画 | Task 16-18 |
+| §12 リスク | 各タスクで mitigate |
+| §13 完了基準 | Task 19 で確認 |
 
 ### Type consistency
 
 - `JobId` / `Program` / `CalcType` は **D2 から import** して使用 (job-manager 側で再定義しない)
-- `JobFlow.work_dir` は `expand_experiment` の `root` 引数から `root.join(uuid.to_string())` で導出
+- `JobFlow.work_dir` フィールドは v4 で **撤廃** (D2 PR で削除、SP-1 は PathResolver::flow_dir() 経由)
 - `DependencyType` (A1) はそのまま `ParentRef.kind` / `JobEdge.kind` に流れる
 - `ExperimentPlan.jobs: BTreeMap<JobId, BTreeMap<String, toml::Value>>` は build / io / py_export 全てで同一型 (key は D2 `JobId` newtype)
 - `JobIdParts<'a>` は `parse_job_id` の戻り値、`source_step_id: &'a str` + `axis_combo: Vec<(&'a str, usize)>` で一貫
-- `expand_experiment(toml_path: &Path, root: &Path) -> Result<(JobFlow, ExperimentPlan), JobManagerError>` のシグネチャは Task 11 / Task 14 / Task 17 で同一
-- `parse_job_id(id: &JobId)` の戻り値型 (Rust `JobIdParts<'_>` / Python dict) は Task 5 / Task 14 / Task 18 で一貫
+- `expand_experiment(toml_path: &Path) -> Result<(JobFlow, ExperimentPlan), JobManagerError>` のシグネチャは Task 11 / Task 14 / Task 17 で同一
+- `parse_job_id(s: &str)` の戻り値型 (Rust `JobIdParts<'_>` / Python dict) は Task 5 / Task 14 / Task 18 で一貫
 
 ### Placeholder scan
 
