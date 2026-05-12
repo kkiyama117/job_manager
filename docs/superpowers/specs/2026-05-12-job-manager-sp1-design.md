@@ -183,14 +183,14 @@ pub fn matches(flow: &JobFlow, job_id: &JobId, status: Option<&StatusEntry>, f: 
 
 // slurm_facade.rs — trait for mockability
 //
-// 型注: A1 の `SlurmManager::query_job_states_batch` が返す `SlurmJobState`
-// (実態は `slurm_async_runner::entities::slurm::status::JobState` の re-export)
-// を使う。tick.rs の transition でも同じ型。SLURM の (state, reason) ペア表現
-// が必要になった時点で `JobStatus` (= JobState + JobReason) に差し替え可能。
+// 型注: A1 の `SlurmManager::query_job_states_batch` の戻り型 `HashMap<u64, JobStatus>`
+// をそのまま透過する。`JobStatus` は `(state: JobState, reason: JobReason)` のペア。
+// tick.rs の `decide_transition` は `JobState` 単体を見るだけなので、呼び出し側で
+// `.state` を抽出して渡す。
 #[async_trait::async_trait]
 pub trait SlurmFacade: Send + Sync {
     async fn query_states_batch(&self, jobids: &[u64])
-        -> Result<HashMap<u64, JobState>, JobManagerError>;
+        -> Result<HashMap<u64, JobStatus>, JobManagerError>;
 }
 
 // concrete impl — A1 の低レベル SlurmManager を保持
