@@ -5,6 +5,7 @@ pub mod path;
 pub mod slurm_facade;
 pub mod status;
 pub mod tick;
+pub mod view;
 pub mod walk;
 
 #[cfg(feature = "pyo3")]
