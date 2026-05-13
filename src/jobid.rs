@@ -83,11 +83,12 @@ pub fn parse_job_id(s: &str) -> Result<JobIdParts<'_>, JobManagerError> {
         };
         let (ax, idx_str) = piece.split_at(eq_pos);
         let idx_str = &idx_str[1..];
-        if ax.is_empty() || !ax.chars().all(valid_step_id_char) {
+        // L-2: axis 名にも step_id 規約 (文字種 + 予約名) を適用。
+        if let Err(e) = validate_step_id(ax) {
             return Err(JobManagerError::JobIdParseError {
                 id: s.to_string(),
                 piece: piece.to_string(),
-                reason: format!("invalid axis name '{ax}'"),
+                reason: format!("invalid axis name '{ax}': {e}"),
             });
         }
         let idx: usize = idx_str
@@ -195,5 +196,21 @@ mod tests {
     fn parse_axis_name_must_be_valid() {
         // axis 名に '=' は使えない (区切り文字なので)
         assert!(parse_job_id("opt__c/d=0").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_reserved_axis_name() {
+        // L-2: axis 名にも step_id と同じ予約名チェックを適用する。
+        // 将来の path / TOML key 衝突を避けるため。
+        for reserved in &["flow", "plan", "experiment", "derived", "status"] {
+            let id = format!("opt__{reserved}=0");
+            assert!(
+                matches!(
+                    parse_job_id(&id),
+                    Err(JobManagerError::JobIdParseError { .. })
+                ),
+                "should reject reserved axis name '{reserved}' in {id}"
+            );
+        }
     }
 }
