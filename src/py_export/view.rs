@@ -5,9 +5,9 @@ use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use crate::persistence::flow::read_flow;
+use crate::persistence::job_run::read_job_run;
 use crate::persistence::path::PathResolver;
 use crate::py_export::path::PyPathResolver;
-use crate::status::io::read_status;
 use crate::view::CalcView;
 
 #[gen_stub_pyclass]
@@ -52,7 +52,7 @@ impl PyCalcView {
     }
 
     fn status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-        let entry = read_status(&self.status_path())?;
+        let entry = read_job_run(&self.status_path())?;
         let d = pyo3::types::PyDict::new(py);
         d.set_item("lifecycle", format!("{:?}", entry.lifecycle).to_lowercase())?;
         d.set_item("updated_at", entry.updated_at.to_rfc3339())?;

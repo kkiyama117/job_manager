@@ -5,7 +5,7 @@
 
 use slurm_async_runner::{JobState, JobStatus};
 
-use crate::status::PerJobStatus;
+use crate::job::lifecycle::Lifecycle;
 
 /// Extension trait that exposes the `is_terminal() && !Completed`
 /// derived predicate. A1 already publishes `is_terminal()` and
@@ -23,7 +23,7 @@ impl JobStateExt for JobState {
 
 #[derive(Debug, Clone)]
 pub struct Decision {
-    pub new: Option<PerJobStatus>,
+    pub new: Option<Lifecycle>,
     pub note: String,
 }
 
@@ -32,13 +32,13 @@ pub struct Decision {
 /// where `new == prev` means no-op (no write needed).
 ///
 /// Invariants (spec §5):
-/// 1. Never writes `Done` (post.bash is the sole authority).
+/// 1. Never writes `Success` (post.bash is the sole authority).
 /// 2. Never overwrites terminal local lifecycle.
 /// 3. SLURM `is_failed_terminal()` → local `Failed` when not already terminal.
 /// 4. SLURM `Unknown` + non-terminal local → no-op + warning (orphan).
 /// 5. SLURM `Completed` + non-terminal local → no-op + warning.
-pub fn decide_transition(prev: Option<PerJobStatus>, slurm: Option<JobStatus>) -> Decision {
-    use PerJobStatus::*;
+pub fn decide_transition(prev: Option<Lifecycle>, slurm: Option<JobStatus>) -> Decision {
+    use Lifecycle::*;
 
     let Some(status) = slurm else {
         return Decision {
@@ -52,8 +52,8 @@ pub fn decide_transition(prev: Option<PerJobStatus>, slurm: Option<JobStatus>) -
     // ---- terminal failure ----
     if state.is_failed_terminal() {
         return match prev {
-            Some(Done) => Decision {
-                new: Some(Done),
+            Some(Success) => Decision {
+                new: Some(Success),
                 note: format!("warning: SLURM {state} but local done"),
             },
             Some(Failed) => Decision {
@@ -70,8 +70,8 @@ pub fn decide_transition(prev: Option<PerJobStatus>, slurm: Option<JobStatus>) -
     // ---- terminal success ----
     if matches!(state, JobState::Completed) {
         return match prev {
-            Some(Done) => Decision {
-                new: Some(Done),
+            Some(Success) => Decision {
+                new: Some(Success),
                 note: "unchanged: done".to_string(),
             },
             Some(Failed) => Decision {
@@ -97,7 +97,7 @@ pub fn decide_transition(prev: Option<PerJobStatus>, slurm: Option<JobStatus>) -
     );
     if is_alive {
         return match prev {
-            Some(Done) | Some(Failed) => Decision {
+            Some(Success) | Some(Failed) => Decision {
                 new: prev,
                 note: format!("warning: SLURM {state} but local terminal"),
             },
@@ -138,7 +138,7 @@ pub fn decide_transition(prev: Option<PerJobStatus>, slurm: Option<JobStatus>) -
 
     // ---- Unknown (jobid expired / forward-compat) ----
     match prev {
-        Some(Done) | Some(Failed) => Decision {
+        Some(Success) | Some(Failed) => Decision {
             new: prev,
             note: "unchanged: jobid expired".to_string(),
         },
@@ -158,19 +158,17 @@ use gaussian_job_shared::entities::workflow::JobId;
 use uuid::Uuid;
 
 use crate::concurrency::parallelism;
+use crate::job::run::JobRun;
+use crate::persistence::job_run::{read_job_run, write_job_run};
 use crate::persistence::path::PathResolver;
 use crate::slurm_facade::SlurmFacade;
-use crate::status::{
-    StatusEntry,
-    io::{read_status, write_status},
-};
 
 #[derive(Debug, Clone)]
 pub struct TickResult {
     pub flow_uuid: Uuid,
     pub job_id: JobId,
-    pub previous: Option<PerJobStatus>,
-    pub new: Option<PerJobStatus>,
+    pub previous: Option<Lifecycle>,
+    pub new: Option<Lifecycle>,
     /// Raw SLURM `(state, reason)` last seen for this jobid. None when the
     /// batch query did not include it (jobid expired) or when the SLURM
     /// query itself failed.
@@ -193,7 +191,7 @@ fn process_one(
     slurm_status: Option<JobStatus>,
     status_path: PathBuf,
 ) -> TickResult {
-    let prev_entry = read_status(&status_path).ok();
+    let prev_entry = read_job_run(&status_path).ok();
     let prev = prev_entry.as_ref().map(|e| e.lifecycle);
     let prev_slurm = prev_entry.as_ref().and_then(|e| e.slurm_status.as_ref());
 
@@ -206,14 +204,14 @@ fn process_one(
     let needs_write = target_lifecycle.is_some() && (lifecycle_changed || slurm_status_changed);
 
     if needs_write && let Some(lifecycle) = target_lifecycle {
-        let entry = StatusEntry {
+        let run = JobRun {
             lifecycle,
             updated_at: Utc::now(),
             slurm_jobid: Some(slurm_jobid),
             slurm_status: slurm_status.clone(),
             note: Some(decision.note.clone()),
         };
-        if let Err(e) = write_status(&status_path, &entry) {
+        if let Err(e) = write_job_run(&status_path, &run) {
             note = format!("status write failed: {e}");
             return TickResult {
                 flow_uuid,
@@ -329,53 +327,53 @@ mod tests {
     #[rstest]
     // (prev, slurm, expected_new, note_substring)
     #[case(None, None, None, "no slurm_jobid")]
-    #[case(None, js(JobState::Pending), Some(PerJobStatus::Queued), "synced")]
+    #[case(None, js(JobState::Pending), Some(Lifecycle::Queued), "synced")]
     #[case(
-        Some(PerJobStatus::Running),
+        Some(Lifecycle::Running),
         js(JobState::Pending),
-        Some(PerJobStatus::Queued),
+        Some(Lifecycle::Queued),
         "regressed"
     )]
     #[case(
-        Some(PerJobStatus::Queued),
+        Some(Lifecycle::Queued),
         js(JobState::Running),
-        Some(PerJobStatus::Running),
+        Some(Lifecycle::Running),
         "promoted"
     )]
     #[case(
-        Some(PerJobStatus::Done),
+        Some(Lifecycle::Success),
         js(JobState::Failed),
-        Some(PerJobStatus::Done),
+        Some(Lifecycle::Success),
         "warning"
     )]
     #[case(
-        Some(PerJobStatus::Running),
+        Some(Lifecycle::Running),
         js(JobState::Failed),
-        Some(PerJobStatus::Failed),
+        Some(Lifecycle::Failed),
         "synced"
     )]
     #[case(
-        Some(PerJobStatus::Running),
+        Some(Lifecycle::Running),
         js(JobState::Completed),
-        Some(PerJobStatus::Running),
+        Some(Lifecycle::Running),
         "post.bash"
     )]
     #[case(
-        Some(PerJobStatus::Done),
+        Some(Lifecycle::Success),
         js(JobState::Completed),
-        Some(PerJobStatus::Done),
+        Some(Lifecycle::Success),
         "unchanged"
     )]
     #[case(
-        Some(PerJobStatus::Queued),
+        Some(Lifecycle::Queued),
         js(JobState::Unknown),
-        Some(PerJobStatus::Queued),
+        Some(Lifecycle::Queued),
         "orphan"
     )]
     fn transition_matrix(
-        #[case] prev: Option<PerJobStatus>,
+        #[case] prev: Option<Lifecycle>,
         #[case] slurm: Option<JobStatus>,
-        #[case] expected: Option<PerJobStatus>,
+        #[case] expected: Option<Lifecycle>,
         #[case] note_substr: &str,
     ) {
         let d = decide_transition(prev, slurm);
@@ -399,14 +397,14 @@ mod tests {
     #[test]
     fn failure_reason_is_surfaced_in_note() {
         let status = JobStatus::with_reason(JobState::OutOfMemory, JobReason::OutOfMemory);
-        let d = decide_transition(Some(PerJobStatus::Running), Some(status));
-        assert_eq!(d.new, Some(PerJobStatus::Failed));
+        let d = decide_transition(Some(Lifecycle::Running), Some(status));
+        assert_eq!(d.new, Some(Lifecycle::Failed));
         assert!(d.note.contains("OUT_OF_MEMORY"), "note: {}", d.note);
         assert!(d.note.contains("OutOfMemory"), "note: {}", d.note);
     }
 
+    use crate::persistence::job_run::{read_job_run, write_job_run};
     use crate::slurm_facade::InMemorySlurmFacade;
-    use crate::status::io::{read_status, write_status};
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -417,14 +415,14 @@ mod tests {
         let job_id = JobId::from("g16");
 
         // Seed local lifecycle = Queued
-        let initial = StatusEntry {
-            lifecycle: PerJobStatus::Queued,
+        let initial = JobRun {
+            lifecycle: Lifecycle::Queued,
             updated_at: Utc::now(),
             slurm_jobid: Some(99),
             slurm_status: None,
             note: None,
         };
-        write_status(&resolver.status_file(&flow_uuid, &job_id), &initial).unwrap();
+        write_job_run(&resolver.status_file(&flow_uuid, &job_id), &initial).unwrap();
 
         let mut m = HashMap::new();
         m.insert(99u64, JobStatus::new(JobState::Running));
@@ -433,12 +431,12 @@ mod tests {
         let results = tick_many(&[(flow_uuid, job_id.clone(), 99)], &slurm, &resolver).await;
         assert_eq!(results.len(), 1);
         let r = &results[0];
-        assert_eq!(r.previous, Some(PerJobStatus::Queued));
-        assert_eq!(r.new, Some(PerJobStatus::Running));
+        assert_eq!(r.previous, Some(Lifecycle::Queued));
+        assert_eq!(r.new, Some(Lifecycle::Running));
         assert!(r.slurm_status.is_some());
 
-        let back = read_status(&resolver.status_file(&flow_uuid, &job_id)).unwrap();
-        assert_eq!(back.lifecycle, PerJobStatus::Running);
+        let back = read_job_run(&resolver.status_file(&flow_uuid, &job_id)).unwrap();
+        assert_eq!(back.lifecycle, Lifecycle::Running);
         // Raw SLURM status is now persisted, not just lifecycle.
         assert_eq!(back.slurm_status.as_ref().unwrap().state, JobState::Running);
     }
@@ -451,8 +449,8 @@ mod tests {
         let job_id = JobId::from("g16");
 
         // Seed: already Failed with OOM reason
-        let initial = StatusEntry {
-            lifecycle: PerJobStatus::Failed,
+        let initial = JobRun {
+            lifecycle: Lifecycle::Failed,
             updated_at: Utc::now(),
             slurm_jobid: Some(55),
             slurm_status: Some(JobStatus::with_reason(
@@ -461,7 +459,7 @@ mod tests {
             )),
             note: Some("synced: failed-terminal".into()),
         };
-        write_status(&resolver.status_file(&flow_uuid, &job_id), &initial).unwrap();
+        write_job_run(&resolver.status_file(&flow_uuid, &job_id), &initial).unwrap();
 
         // SLURM now reports a different failed-terminal: Timeout.
         let mut m = HashMap::new();
@@ -472,12 +470,12 @@ mod tests {
         let slurm = InMemorySlurmFacade::new(m);
 
         let results = tick_many(&[(flow_uuid, job_id.clone(), 55)], &slurm, &resolver).await;
-        assert_eq!(results[0].previous, Some(PerJobStatus::Failed));
-        assert_eq!(results[0].new, Some(PerJobStatus::Failed));
+        assert_eq!(results[0].previous, Some(Lifecycle::Failed));
+        assert_eq!(results[0].new, Some(Lifecycle::Failed));
 
         // File is refreshed even though lifecycle did not change.
-        let back = read_status(&resolver.status_file(&flow_uuid, &job_id)).unwrap();
-        assert_eq!(back.lifecycle, PerJobStatus::Failed);
+        let back = read_job_run(&resolver.status_file(&flow_uuid, &job_id)).unwrap();
+        assert_eq!(back.lifecycle, Lifecycle::Failed);
         let s = back.slurm_status.as_ref().unwrap();
         assert_eq!(s.state, JobState::Timeout);
         assert_eq!(s.reason, JobReason::TimeLimit);
@@ -489,19 +487,19 @@ mod tests {
         let resolver = PathResolver::new(dir.path());
         let flow_uuid = Uuid::now_v7();
         let job_id = JobId::from("g16");
-        let initial = StatusEntry {
-            lifecycle: PerJobStatus::Running,
+        let initial = JobRun {
+            lifecycle: Lifecycle::Running,
             updated_at: Utc::now(),
             slurm_jobid: Some(77),
             slurm_status: None,
             note: None,
         };
-        write_status(&resolver.status_file(&flow_uuid, &job_id), &initial).unwrap();
+        write_job_run(&resolver.status_file(&flow_uuid, &job_id), &initial).unwrap();
 
         let slurm = InMemorySlurmFacade::new(HashMap::new()); // no entry for 77
         let results = tick_many(&[(flow_uuid, job_id.clone(), 77)], &slurm, &resolver).await;
-        assert_eq!(results[0].previous, Some(PerJobStatus::Running));
-        assert_eq!(results[0].new, Some(PerJobStatus::Running));
+        assert_eq!(results[0].previous, Some(Lifecycle::Running));
+        assert_eq!(results[0].new, Some(Lifecycle::Running));
         assert!(results[0].slurm_status.is_none());
     }
 }

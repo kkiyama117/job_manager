@@ -4,7 +4,7 @@ from job_manager import _job_manager_core as _core
 
 PathResolver = _core.PathResolver
 SearchFilter = _core.SearchFilter
-PerJobStatus = _core.PerJobStatus
+Lifecycle = _core.Lifecycle
 CalcView = _core.CalcView
 walk_flows = _core.walk_flows
 tick_many = _core.tick_many
@@ -23,7 +23,7 @@ write_plan = _core.write_plan
 __all__ = [
     "PathResolver",
     "SearchFilter",
-    "PerJobStatus",
+    "Lifecycle",
     "CalcView",
     "walk_flows",
     "tick_many",

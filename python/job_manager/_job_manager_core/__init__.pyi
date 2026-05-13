@@ -11,8 +11,8 @@ import typing
 __all__ = [
     "CalcView",
     "ExperimentPlan",
+    "Lifecycle",
     "PathResolver",
-    "PerJobStatus",
     "SearchFilter",
     "build_job_id",
     "parse_job_id",
@@ -66,9 +66,9 @@ class SearchFilter:
     @tags.setter
     def tags(self, value: typing.Mapping[builtins.str, builtins.str]) -> None: ...
     @property
-    def status(self) -> typing.Optional[PerJobStatus]: ...
+    def status(self) -> typing.Optional[Lifecycle]: ...
     @status.setter
-    def status(self, value: typing.Optional[PerJobStatus]) -> None: ...
+    def status(self, value: typing.Optional[Lifecycle]) -> None: ...
     @property
     def flow_uuid_prefix(self) -> typing.Optional[builtins.str]: ...
     @flow_uuid_prefix.setter
@@ -93,7 +93,7 @@ class SearchFilter:
         cls,
         program: typing.Optional[builtins.str] = None,
         tags: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None,
-        status: typing.Optional[PerJobStatus] = None,
+        status: typing.Optional[Lifecycle] = None,
         flow_uuid_prefix: typing.Optional[builtins.str] = None,
         created_after: typing.Optional[datetime.datetime] = None,
         created_before: typing.Optional[datetime.datetime] = None,
@@ -102,11 +102,12 @@ class SearchFilter:
     ) -> SearchFilter: ...
 
 @typing.final
-class PerJobStatus(enum.Enum):
+class Lifecycle(enum.Enum):
     Queued = ...
     Running = ...
-    Done = ...
+    Success = ...
     Failed = ...
+    Skipped = ...
 
 def build_job_id(
     source_step_id: builtins.str,

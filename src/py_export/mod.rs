@@ -27,7 +27,7 @@ mod job_manager_core {
     #[pymodule_export]
     use super::plan::PyExperimentPlan;
     #[pymodule_export]
-    use super::status::PyPerJobStatus;
+    use super::status::PyLifecycle;
     #[pymodule_export]
     use super::view::PyCalcView;
 

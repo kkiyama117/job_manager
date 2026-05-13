@@ -5,8 +5,9 @@ use std::path::PathBuf;
 use gaussian_job_shared::entities::workflow::{Job, JobFlow, JobId};
 
 use crate::error::JobManagerError;
+use crate::job::run::JobRun;
+use crate::persistence::job_run::read_job_run;
 use crate::persistence::path::PathResolver;
-use crate::status::{StatusEntry, io::read_status};
 
 #[derive(Debug)]
 pub struct CalcView<'a> {
@@ -41,8 +42,8 @@ impl<'a> CalcView<'a> {
             .expect("constructor enforces presence")
     }
 
-    pub fn status(&self) -> Result<StatusEntry, JobManagerError> {
-        read_status(&self.resolver.status_file(&self.flow.uuid, &self.job_id))
+    pub fn status(&self) -> Result<JobRun, JobManagerError> {
+        read_job_run(&self.resolver.status_file(&self.flow.uuid, &self.job_id))
     }
 
     pub fn job_dir(&self) -> PathBuf {
@@ -95,7 +96,6 @@ impl<'a> CalcView<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::status::{PerJobStatus, io::write_status};
     use chrono::Utc;
     use gaussian_job_shared::entities::workflow::{Job, JobFlow, JobSpec, Program};
     use slurm_async_runner::entities::slurm::SlurmJobConfig;
@@ -175,16 +175,20 @@ mod tests {
         let r = PathResolver::new(dir.path());
         let uuid = Uuid::now_v7();
         let f = single_job_flow(uuid);
-        let entry = StatusEntry {
-            lifecycle: PerJobStatus::Queued,
+        let run = crate::job::run::JobRun {
+            lifecycle: crate::job::lifecycle::Lifecycle::Queued,
             updated_at: Utc::now(),
             slurm_jobid: Some(7),
             slurm_status: None,
             note: None,
         };
-        write_status(&r.status_file(&uuid, &JobId::from("g16")), &entry).unwrap();
+        crate::persistence::job_run::write_job_run(
+            &r.status_file(&uuid, &JobId::from("g16")),
+            &run,
+        )
+        .unwrap();
         let v = CalcView::new(&f, JobId::from("g16"), &r).unwrap();
         let got = v.status().unwrap();
-        assert_eq!(got.lifecycle, PerJobStatus::Queued);
+        assert_eq!(got.lifecycle, crate::job::lifecycle::Lifecycle::Queued);
     }
 }
