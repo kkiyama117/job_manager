@@ -1,13 +1,12 @@
 //! Path resolution for the `<root>/<flow_uuid>/<JobId>/...` layout.
 //!
-//! Layout invariant (matches D2's `JobFlow.work_dir` docstring —
-//! "<work_dir>/<JobId>/ is each Job's folder"):
+//! Layout invariant:
 //!
 //! ```text
 //! <root>/                  <- PathResolver.root
-//! └── <flow_uuid>/         <- = JobFlow.work_dir (set at flow-create time)
+//! └── <flow_uuid>/         <- flow_dir(&flow.uuid)
 //!     ├── flow.toml        <- JobFlow TOML
-//!     └── <JobId>/         <- = flow.work_dir / <JobId>
+//!     └── <JobId>/         <- job_dir(&flow.uuid, &job_id)
 //!         └── .status.toml <- per-Job status (this crate, atomic write)
 //! ```
 //!
@@ -32,9 +31,9 @@ impl PathResolver {
         &self.root
     }
 
-    /// `<root>/<flow_uuid>/`. This is the path that should be stored in
-    /// `JobFlow.work_dir` so that the file-system position and the D2
-    /// field stay in lockstep.
+    /// `<root>/<flow_uuid>/`. This is the canonical on-disk folder for a
+    /// `JobFlow`; D2 no longer stores it as a field, so callers should
+    /// always derive it from the flow's `uuid` via this resolver.
     pub fn flow_dir(&self, flow_uuid: &Uuid) -> PathBuf {
         self.root.join(flow_uuid.to_string())
     }

@@ -74,7 +74,6 @@ mod tests {
     use chrono::Utc;
     use futures::StreamExt;
     use std::collections::BTreeMap;
-    use std::path::PathBuf;
     use tempfile::TempDir;
     use uuid::Uuid;
 
@@ -82,7 +81,6 @@ mod tests {
         JobFlow {
             uuid,
             created_at: Utc::now(),
-            work_dir: PathBuf::from("/tmp/x"),
             tags: BTreeMap::new(),
             jobs: BTreeMap::new(),
         }

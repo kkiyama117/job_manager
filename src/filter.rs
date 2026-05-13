@@ -83,7 +83,6 @@ mod tests {
     use rstest::rstest;
     use slurm_async_runner::entities::slurm::SlurmJobConfig;
     use std::collections::BTreeMap;
-    use std::path::PathBuf;
     use uuid::Uuid;
 
     fn cfg() -> SlurmJobConfig {
@@ -117,7 +116,6 @@ mod tests {
         let flow = JobFlow {
             uuid,
             created_at: Utc::now(),
-            work_dir: PathBuf::from("/tmp"),
             tags,
             jobs,
         };

@@ -100,7 +100,6 @@ mod tests {
     use gaussian_job_shared::entities::workflow::{Job, JobFlow, JobSpec, Program};
     use slurm_async_runner::entities::slurm::SlurmJobConfig;
     use std::collections::BTreeMap;
-    use std::path::PathBuf;
     use tempfile::TempDir;
     use uuid::Uuid;
 
@@ -136,7 +135,6 @@ mod tests {
         JobFlow {
             uuid,
             created_at: Utc::now(),
-            work_dir: PathBuf::from("/tmp"),
             tags: BTreeMap::new(),
             jobs,
         }
