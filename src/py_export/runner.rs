@@ -4,7 +4,6 @@ use std::collections::HashMap;
 
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::future_into_py;
-use pyo3_stub_gen::derive::gen_stub_pyfunction;
 
 use crate::flow::FlowRun;
 use crate::persistence::PathResolver;
@@ -20,9 +19,10 @@ use crate::slurm::querier::InMemoryQuerier;
 ///
 /// Returns a `dict[str, int]` mapping `JobId` → SLURM jobid for the jobs
 /// that were submitted. Empty when `dry_run=True`.
-#[gen_stub_pyfunction]
-#[pyfunction]
-#[pyo3(signature = (root, flow_uuid, dry_run = false))]
+///
+/// Not annotated with `#[pyfunction]` directly — the `#[pymodule]` in
+/// `py_export/mod.rs` re-declares the pyfunction wrapper to avoid duplicate
+/// stub-gen registrations.
 pub fn submit_flow<'py>(
     py: Python<'py>,
     root: std::path::PathBuf,

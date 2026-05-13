@@ -7,27 +7,34 @@ import enum
 import os
 import pathlib
 import typing
-
 __all__ = [
     "CalcView",
     "ExperimentPlan",
+    "FlowRun",
+    "JobRun",
     "Lifecycle",
     "PathResolver",
     "SearchFilter",
     "build_job_id",
     "parse_job_id",
+    "read_common",
+    "read_flow",
+    "read_job_run",
     "read_plan",
+    "render_batch_bash",
+    "submit_flow",
     "validate_job_id",
     "validate_step_id",
     "walk_flows",
+    "write_common",
+    "write_flow",
+    "write_job_run",
     "write_plan",
 ]
 
 @typing.final
 class CalcView:
-    def __new__(
-        cls, resolver: PathResolver, flow_uuid: builtins.str, job_id: builtins.str
-    ) -> CalcView: ...
+    def __new__(cls, resolver: PathResolver, flow_uuid: builtins.str, job_id: builtins.str) -> CalcView: ...
     def job_dir(self) -> pathlib.Path: ...
     def status_path(self) -> pathlib.Path: ...
     def status(self) -> dict: ...
@@ -41,18 +48,39 @@ class ExperimentPlan:
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
+class FlowRun:
+    @property
+    def flow_uuid(self) -> builtins.str: ...
+    @staticmethod
+    def read(root: builtins.str | os.PathLike | pathlib.Path, flow_uuid: builtins.str) -> FlowRun:
+        r"""
+        Read `flow.toml` + `plan.toml` (+ optional `common.toml`) from `root`
+        and return a `FlowRun` for `flow_uuid`.
+        """
+
+@typing.final
+class JobRun:
+    r"""
+    Python-facing wrapper for `JobRun` (旧 `StatusEntry`).
+    
+    Read-only view. Mutation is performed in Rust via `FlowRunner::submit`/`tick`.
+    """
+    @property
+    def lifecycle(self) -> Lifecycle: ...
+    @property
+    def slurm_jobid(self) -> typing.Optional[builtins.int]: ...
+    @property
+    def note(self) -> typing.Optional[builtins.str]: ...
+
+@typing.final
 class PathResolver:
-    def __new__(
-        cls, root: builtins.str | os.PathLike | pathlib.Path
-    ) -> PathResolver: ...
+    def __new__(cls, root: builtins.str | os.PathLike | pathlib.Path) -> PathResolver: ...
     def root(self) -> pathlib.Path: ...
     def flow_dir(self, flow_uuid: builtins.str) -> pathlib.Path: ...
     def flow_toml(self, flow_uuid: builtins.str) -> pathlib.Path: ...
     def plan_toml(self, flow_uuid: builtins.str) -> pathlib.Path: ...
     def experiment_toml(self, flow_uuid: builtins.str) -> pathlib.Path: ...
-    def status_file(
-        self, flow_uuid: builtins.str, job_id: builtins.str
-    ) -> pathlib.Path: ...
+    def status_file(self, flow_uuid: builtins.str, job_id: builtins.str) -> pathlib.Path: ...
 
 @typing.final
 class SearchFilter:
@@ -88,17 +116,7 @@ class SearchFilter:
     def job_id(self) -> typing.Optional[builtins.str]: ...
     @job_id.setter
     def job_id(self, value: typing.Optional[builtins.str]) -> None: ...
-    def __new__(
-        cls,
-        program: typing.Optional[builtins.str] = None,
-        tags: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None,
-        status: typing.Optional[Lifecycle] = None,
-        flow_uuid_prefix: typing.Optional[builtins.str] = None,
-        created_after: typing.Optional[datetime.datetime] = None,
-        created_before: typing.Optional[datetime.datetime] = None,
-        slurm_jobid: typing.Optional[builtins.int] = None,
-        job_id: typing.Optional[builtins.str] = None,
-    ) -> SearchFilter: ...
+    def __new__(cls, program: typing.Optional[builtins.str] = None, tags: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None, status: typing.Optional[Lifecycle] = None, flow_uuid_prefix: typing.Optional[builtins.str] = None, created_after: typing.Optional[datetime.datetime] = None, created_before: typing.Optional[datetime.datetime] = None, slurm_jobid: typing.Optional[builtins.int] = None, job_id: typing.Optional[builtins.str] = None) -> SearchFilter: ...
 
 @typing.final
 class Lifecycle(enum.Enum):
@@ -108,15 +126,33 @@ class Lifecycle(enum.Enum):
     Failed = ...
     Skipped = ...
 
-def build_job_id(
-    source_step_id: builtins.str,
-    axis_combo: typing.Sequence[tuple[builtins.str, builtins.int]],
-) -> builtins.str: ...
+def build_job_id(source_step_id: builtins.str, axis_combo: typing.Sequence[tuple[builtins.str, builtins.int]]) -> builtins.str: ...
+
 def parse_job_id(s: builtins.str) -> dict: ...
+
+def read_common(path: builtins.str | os.PathLike | pathlib.Path) -> builtins.str: ...
+
+def read_flow(path: builtins.str | os.PathLike | pathlib.Path) -> builtins.str: ...
+
+def read_job_run(path: builtins.str | os.PathLike | pathlib.Path) -> JobRun: ...
+
 def read_plan(path: builtins.str | os.PathLike | pathlib.Path) -> ExperimentPlan: ...
+
+def render_batch_bash(flow_uuid: builtins.str, job_id: builtins.str, body: builtins.str, params: typing.Mapping[builtins.str, builtins.str]) -> builtins.str: ...
+
+def submit_flow(root: builtins.str | os.PathLike | pathlib.Path, flow_uuid: builtins.str, dry_run: builtins.bool = False) -> typing.Any: ...
+
 def validate_job_id(s: builtins.str) -> builtins.str: ...
+
 def validate_step_id(s: builtins.str) -> builtins.str: ...
+
 def walk_flows(root: builtins.str | os.PathLike | pathlib.Path) -> typing.Any: ...
-def write_plan(
-    path: builtins.str | os.PathLike | pathlib.Path, plan: ExperimentPlan
-) -> None: ...
+
+def write_common(path: builtins.str | os.PathLike | pathlib.Path, toml_str: builtins.str) -> None: ...
+
+def write_flow(path: builtins.str | os.PathLike | pathlib.Path, toml_str: builtins.str) -> None: ...
+
+def write_job_run(path: builtins.str | os.PathLike | pathlib.Path, run: JobRun) -> None: ...
+
+def write_plan(path: builtins.str | os.PathLike | pathlib.Path, plan: ExperimentPlan) -> None: ...
+

@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 
 use pyo3::prelude::*;
-use pyo3_stub_gen::derive::gen_stub_pyfunction;
 
 use crate::jobid::parse_job_id;
 use crate::render::render_batch_bash as inner;
@@ -14,8 +13,10 @@ use gaussian_job_shared::entities::workflow::JobId;
 /// `params` values are passed as plain strings; they round-trip as
 /// `toml::Value::String`. Numeric / boolean / array params must be
 /// stringified on the Python side first.
-#[gen_stub_pyfunction]
-#[pyfunction]
+///
+/// Not annotated with `#[pyfunction]` directly — the `#[pymodule]` in
+/// `py_export/mod.rs` re-declares the pyfunction wrapper to avoid duplicate
+/// stub-gen registrations.
 pub fn render_batch_bash(
     flow_uuid: &str,
     job_id: &str,
