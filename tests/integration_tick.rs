@@ -9,7 +9,7 @@ use job_manager::job::run::JobRun;
 use job_manager::persistence::job_run::{read_job_run, write_job_run};
 use job_manager::persistence::path::PathResolver;
 use job_manager::slurm::InMemoryQuerier;
-use job_manager::tick::tick_many;
+use job_manager::tick_many;
 use slurm_async_runner::{JobState, JobStatus};
 use tempfile::TempDir;
 use uuid::Uuid;

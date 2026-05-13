@@ -4,8 +4,8 @@ use pyo3::prelude::*;
 
 use crate::persistence::path::PathResolver;
 use crate::py_export::path::PyPathResolver;
+use crate::runner::transition::tick_many as inner_tick_many;
 use crate::slurm::SlurmQuerier;
-use crate::tick::tick_many as inner_tick_many;
 
 /// Tick a list of `(flow_uuid: str, job_id: str, slurm_jobid: int)` targets.
 ///
