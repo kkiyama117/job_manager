@@ -5,6 +5,8 @@ use std::path::Path;
 use crate::error::JobManagerError;
 use crate::plan::ExperimentPlan;
 
+/// Read an `ExperimentPlan` from a TOML file at `path`.
+#[must_use = "read_plan returns the parsed ExperimentPlan; ignoring it drops the data"]
 pub fn read_plan(path: &Path) -> Result<ExperimentPlan, JobManagerError> {
     let text = std::fs::read_to_string(path).map_err(|e| JobManagerError::Io {
         path: path.to_path_buf(),
@@ -16,17 +18,34 @@ pub fn read_plan(path: &Path) -> Result<ExperimentPlan, JobManagerError> {
     })
 }
 
+/// Write `plan` to `path` atomically (write to `<path>.tmp` then rename).
+/// Creates parent directories if missing (対称: `flow_io::write_flow`)。
 pub fn write_plan(path: &Path, plan: &ExperimentPlan) -> Result<(), JobManagerError> {
+    // M-4: write_flow と同じく親 dir を自動作成し、呼び側の create_dir_all 重複を解消。
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| JobManagerError::Io {
+            path: parent.to_path_buf(),
+            source: e,
+        })?;
+    }
     let text = toml::to_string_pretty(plan)?;
     let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, text).map_err(|e| JobManagerError::Io {
-        path: tmp.clone(),
-        source: e,
-    })?;
-    std::fs::rename(&tmp, path).map_err(|e| JobManagerError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })
+    let result = std::fs::write(&tmp, text)
+        .map_err(|e| JobManagerError::Io {
+            path: tmp.clone(),
+            source: e,
+        })
+        .and_then(|()| {
+            std::fs::rename(&tmp, path).map_err(|e| JobManagerError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })
+        });
+    if result.is_err() {
+        // L-3: write/rename どちらの失敗でも tmp が残る可能性があるため best-effort で削除。
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -93,6 +112,31 @@ route = "# x"
 "##;
         let result: Result<ExperimentPlan, _> = toml::from_str(bad);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_creates_parent_dirs() {
+        // M-4: write_flow と対称に、親ディレクトリを自動作成する。
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("a/b/c");
+        let path = nested.join("plan.toml");
+        let p = sample_plan();
+        write_plan(&path, &p).unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn write_plan_cleans_up_tmp_on_rename_failure() {
+        // L-3: rename 失敗時に .toml.tmp が残らないことを検証。
+        // target が既存ディレクトリだと rename(file, dir) は失敗するので、それで誘発する。
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("plan.toml");
+        std::fs::create_dir_all(&path).unwrap();
+        let p = sample_plan();
+        let result = write_plan(&path, &p);
+        assert!(result.is_err());
+        let tmp = path.with_extension("toml.tmp");
+        assert!(!tmp.exists(), "tmp leaked at {tmp:?}");
     }
 
     #[test]

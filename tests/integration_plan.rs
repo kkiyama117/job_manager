@@ -164,7 +164,7 @@ fn pathresolver_plan_toml_round_trip() {
     let dir = tempdir().unwrap();
     let resolver = PathResolver::new(dir.path().to_path_buf());
     let uuid = Uuid::now_v7();
-    std::fs::create_dir_all(resolver.flow_dir(&uuid)).unwrap();
+    // M-4: write_plan が parent dir を自動作成するので明示的な create_dir_all は不要。
 
     let mut jobs = BTreeMap::new();
     jobs.insert(JobId::from("opt"), BTreeMap::new());

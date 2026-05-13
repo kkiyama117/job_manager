@@ -69,7 +69,10 @@ pub fn parse_job_id(s: &str) -> Result<JobIdParts<'_>, JobManagerError> {
         return Err(JobManagerError::InvalidJobId(String::new()));
     }
     let mut iter = s.split("__");
-    let source_step_id = iter.next().expect("split yields >=1");
+    // INVARIANT: `str::split` は空文字列に対しても 1 要素 (空文字) を返し、
+    // 区切り文字を含まない文字列でも 1 要素を返す (Rust std 仕様)。`s.is_empty()`
+    // は冒頭で reject 済みなので、ここでは必ず Some が返る。
+    let source_step_id = iter.next().expect("str::split always yields >=1 item");
     validate_step_id(source_step_id)?;
 
     let mut axis_combo: Vec<(&str, usize)> = Vec::new();
@@ -83,11 +86,12 @@ pub fn parse_job_id(s: &str) -> Result<JobIdParts<'_>, JobManagerError> {
         };
         let (ax, idx_str) = piece.split_at(eq_pos);
         let idx_str = &idx_str[1..];
-        if ax.is_empty() || !ax.chars().all(valid_step_id_char) {
+        // L-2: axis 名にも step_id 規約 (文字種 + 予約名) を適用。
+        if let Err(e) = validate_step_id(ax) {
             return Err(JobManagerError::JobIdParseError {
                 id: s.to_string(),
                 piece: piece.to_string(),
-                reason: format!("invalid axis name '{ax}'"),
+                reason: format!("invalid axis name '{ax}': {e}"),
             });
         }
         let idx: usize = idx_str
@@ -156,6 +160,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_job_id_rejects_reserved_names() {
+        // M-5: 予約名は step_id だけでなく JobId 全体としても reject されること
+        // (validate_job_id → parse_job_id → validate_step_id の連鎖を明示的に検証)。
+        for reserved in &["flow", "plan", "experiment", "derived", "status"] {
+            assert!(
+                matches!(
+                    validate_job_id(reserved),
+                    Err(JobManagerError::ReservedJobId(_))
+                ),
+                "should reject reserved JobId '{reserved}'"
+            );
+        }
+    }
+
+    #[test]
     fn build_no_sweep_returns_step_id() {
         assert_eq!(build_job_id("opt", &[]), "opt");
     }
@@ -195,5 +214,21 @@ mod tests {
     fn parse_axis_name_must_be_valid() {
         // axis 名に '=' は使えない (区切り文字なので)
         assert!(parse_job_id("opt__c/d=0").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_reserved_axis_name() {
+        // L-2: axis 名にも step_id と同じ予約名チェックを適用する。
+        // 将来の path / TOML key 衝突を避けるため。
+        for reserved in &["flow", "plan", "experiment", "derived", "status"] {
+            let id = format!("opt__{reserved}=0");
+            assert!(
+                matches!(
+                    parse_job_id(&id),
+                    Err(JobManagerError::JobIdParseError { .. })
+                ),
+                "should reject reserved axis name '{reserved}' in {id}"
+            );
+        }
     }
 }

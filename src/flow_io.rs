@@ -29,15 +29,22 @@ pub fn write_flow(path: &Path, flow: &JobFlow) -> Result<(), JobManagerError> {
     }
     let body = toml::to_string_pretty(flow)?;
     let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, body).map_err(|source| JobManagerError::Io {
-        path: tmp.clone(),
-        source,
-    })?;
-    std::fs::rename(&tmp, path).map_err(|source| JobManagerError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    Ok(())
+    let result = std::fs::write(&tmp, body)
+        .map_err(|source| JobManagerError::Io {
+            path: tmp.clone(),
+            source,
+        })
+        .and_then(|()| {
+            std::fs::rename(&tmp, path).map_err(|source| JobManagerError::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+        });
+    if result.is_err() {
+        // L-3: write/rename どちらの失敗でも tmp が残る可能性があるため best-effort で削除。
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -137,6 +144,20 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("flow.toml");
         write_flow(&path, &sample_flow()).unwrap();
+        let tmp = path.with_extension("toml.tmp");
+        assert!(!tmp.exists(), "tmp file leaked: {tmp:?}");
+    }
+
+    #[test]
+    fn write_flow_cleans_up_tmp_on_rename_failure() {
+        // L-3: rename 失敗時に .toml.tmp が残らないことを検証。
+        // target が既存ディレクトリだと rename(file, dir) は失敗するので、それで誘発する。
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("flow.toml");
+        std::fs::create_dir_all(&path).unwrap();
+        let flow = sample_flow();
+        let result = write_flow(&path, &flow);
+        assert!(result.is_err());
         let tmp = path.with_extension("toml.tmp");
         assert!(!tmp.exists(), "tmp file leaked: {tmp:?}");
     }
