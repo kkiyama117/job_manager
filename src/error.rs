@@ -40,6 +40,22 @@ pub enum JobManagerError {
     #[error("slurm facade error: {0}")]
     Slurm(String),
 
+    #[error("invalid step id '{0}': must match [A-Za-z0-9_-]+")]
+    InvalidStepId(String),
+
+    #[error("invalid job id '{0}': must match [A-Za-z0-9_\\-=]+")]
+    InvalidJobId(String),
+
+    #[error("reserved id '{0}' (reserved: flow, plan, experiment, derived, status)")]
+    ReservedJobId(String),
+
+    #[error("job id parse error in '{id}' at piece '{piece}': {reason}")]
+    JobIdParseError {
+        id: String,
+        piece: String,
+        reason: String,
+    },
+
     #[error("{0}")]
     Other(String),
 }
@@ -75,5 +91,18 @@ mod tests {
             source: parse.err().unwrap(),
         };
         assert!(err.to_string().contains("/tmp/bad.toml"));
+    }
+
+    #[test]
+    fn invalid_step_id_carries_input() {
+        let err = JobManagerError::InvalidStepId("opt=1".to_string());
+        assert!(err.to_string().contains("opt=1"));
+    }
+
+    #[test]
+    fn reserved_job_id_carries_name() {
+        let err = JobManagerError::ReservedJobId("flow".to_string());
+        assert!(err.to_string().contains("flow"));
+        assert!(err.to_string().contains("reserved"));
     }
 }
