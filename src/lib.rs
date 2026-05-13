@@ -27,7 +27,7 @@ pub use persistence::{
 };
 pub use plan::ExperimentPlan;
 pub use render::render_batch_bash;
-pub use runner::{Decision, TickResult, decide_transition, tick_many};
+pub use runner::{Decision, TickResult, decide_transition};
 pub use search::{SearchFilter, matches};
 pub use slurm::executor::{DryRunExecutor, Executor, MockExecutor, SbatchExecutor};
 pub use slurm::{InMemoryQuerier, Querier, SlurmQuerier};

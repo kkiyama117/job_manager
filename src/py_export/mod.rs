@@ -37,17 +37,8 @@ mod job_manager_core {
         super::walk::walk_flows(py, root)
     }
 
-    #[pyo3_stub_gen::derive::gen_stub_pyfunction()]
-    #[pyfunction]
-    #[pyo3(signature = (resolver, targets, srun_cmd=None))]
-    fn tick_many<'py>(
-        py: Python<'py>,
-        resolver: Py<super::path::PyPathResolver>,
-        targets: Vec<(String, String, u64)>,
-        srun_cmd: Option<String>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        super::tick::tick_many(py, resolver, targets, srun_cmd)
-    }
+    // TODO(Phase G.1/G.2): tick_many pyfunction removed; will be replaced by
+    // FlowRunner::tick binding once Phase E.5 lands.
 
     // SP-2: jobid helpers
     #[pyo3_stub_gen::derive::gen_stub_pyfunction()]

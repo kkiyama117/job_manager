@@ -7,7 +7,7 @@ SearchFilter = _core.SearchFilter
 Lifecycle = _core.Lifecycle
 CalcView = _core.CalcView
 walk_flows = _core.walk_flows
-tick_many = _core.tick_many
+# TODO(Phase G.1/G.2): tick_many removed; FlowRunner::tick binding coming in E.5.
 
 # SP-2: jobid helpers
 validate_step_id = _core.validate_step_id
@@ -26,7 +26,6 @@ __all__ = [
     "Lifecycle",
     "CalcView",
     "walk_flows",
-    "tick_many",
     # SP-2
     "validate_step_id",
     "validate_job_id",
