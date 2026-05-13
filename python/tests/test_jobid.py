@@ -54,3 +54,30 @@ def test_parse_rejects_malformed():
 
 def test_validate_job_id_accepts_sweep_form():
     assert validate_job_id("opt__compound=0__method=2") == "opt__compound=0__method=2"
+
+
+# --- M-3: Python 公開境界の build_job_id は fallible で source / axis を検証する。 ---
+
+
+def test_build_job_id_rejects_invalid_source_step_id():
+    """M-3: 不正文字 / 予約名を source_step_id に渡すと ValueError。"""
+    for bad in ["../evil", "opt/sub", "opt=1", ""]:
+        with pytest.raises(ValueError):
+            build_job_id(bad, [("compound", 0)])
+    for reserved in ["flow", "plan", "experiment", "derived", "status"]:
+        with pytest.raises(ValueError):
+            build_job_id(reserved, [])
+
+
+def test_build_job_id_rejects_invalid_axis_name():
+    """M-3: axis 名の不正文字も ValueError。"""
+    for bad in ["../evil", "ax=1", "ax/sub", ""]:
+        with pytest.raises(ValueError):
+            build_job_id("opt", [(bad, 0)])
+
+
+def test_build_job_id_rejects_reserved_axis_name():
+    """M-3: axis 名に予約名 (flow/plan/...) を使うと ValueError。"""
+    for reserved in ["flow", "plan", "experiment", "derived", "status"]:
+        with pytest.raises(ValueError):
+            build_job_id("opt", [(reserved, 0)])

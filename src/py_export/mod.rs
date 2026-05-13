@@ -64,7 +64,7 @@ mod job_manager_core {
 
     #[pyo3_stub_gen::derive::gen_stub_pyfunction()]
     #[pyfunction]
-    fn build_job_id(source_step_id: &str, axis_combo: Vec<(String, usize)>) -> String {
+    fn build_job_id(source_step_id: &str, axis_combo: Vec<(String, usize)>) -> PyResult<String> {
         super::jobid::build_job_id(source_step_id, axis_combo)
     }
 
