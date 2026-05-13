@@ -65,6 +65,10 @@ impl PathResolver {
     pub fn status_file(&self, flow_uuid: &Uuid, job_id: &JobId) -> PathBuf {
         self.job_dir(flow_uuid, job_id).join(".status.toml")
     }
+
+    pub fn common_toml(&self) -> PathBuf {
+        self.root.join("common.toml")
+    }
 }
 
 #[cfg(test)]
@@ -127,5 +131,14 @@ mod tests {
         let uuid = Uuid::nil();
         let p = r.experiment_toml(&uuid);
         assert!(p.ends_with("experiment.toml"));
+    }
+
+    #[test]
+    fn common_toml_returns_root_common_toml() {
+        let r = PathResolver::new("/work");
+        assert_eq!(
+            r.common_toml(),
+            std::path::PathBuf::from("/work/common.toml")
+        );
     }
 }
