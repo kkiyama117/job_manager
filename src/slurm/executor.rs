@@ -1,7 +1,9 @@
 //! Executor trait — abstraction over sbatch submission.
 
+use std::collections::VecDeque;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use slurm_async_runner::{SbatchCmd, SbatchManager};
@@ -48,6 +50,39 @@ impl Executor for DryRunExecutor {
     }
 }
 
+/// Mock executor for integration tests — returns pre-recorded jobids in order and logs calls.
+pub struct MockExecutor {
+    recordings: Mutex<VecDeque<u64>>,
+    calls_log: Mutex<Vec<SbatchCmd>>,
+}
+
+impl MockExecutor {
+    pub fn new(recordings: Vec<u64>) -> Self {
+        Self {
+            recordings: Mutex::new(recordings.into_iter().collect()),
+            calls_log: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn calls(&self) -> Vec<SbatchCmd> {
+        self.calls_log.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl Executor for MockExecutor {
+    async fn submit(&self, cmd: SbatchCmd) -> Result<u64, JobManagerError> {
+        self.calls_log.lock().unwrap().push(cmd.clone());
+        self.recordings
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| JobManagerError::SubmitFailed {
+                source: anyhow::anyhow!("MockExecutor recordings exhausted"),
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,5 +107,40 @@ mod tests {
 
         assert_eq!(j1, j2, "same script => same fake jobid");
         assert_ne!(j1, j3, "different script => different jobid");
+    }
+
+    #[tokio::test]
+    async fn mock_returns_recorded_jobids_in_order() {
+        let exec = MockExecutor::new(vec![100, 200, 300]);
+        assert_eq!(
+            exec.submit(SbatchCmd::new(PathBuf::from("/tmp/a.sh")))
+                .await
+                .unwrap(),
+            100
+        );
+        assert_eq!(
+            exec.submit(SbatchCmd::new(PathBuf::from("/tmp/b.sh")))
+                .await
+                .unwrap(),
+            200
+        );
+        assert_eq!(
+            exec.submit(SbatchCmd::new(PathBuf::from("/tmp/c.sh")))
+                .await
+                .unwrap(),
+            300
+        );
+        assert_eq!(exec.calls().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn mock_errors_when_exhausted() {
+        let exec = MockExecutor::new(vec![100]);
+        let _ = exec
+            .submit(SbatchCmd::new(PathBuf::from("/x")))
+            .await
+            .unwrap();
+        let result = exec.submit(SbatchCmd::new(PathBuf::from("/y"))).await;
+        assert!(result.is_err());
     }
 }
