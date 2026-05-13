@@ -1,7 +1,6 @@
 //! Integration: 100-flow walk completes under 1s.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::time::Instant;
 
 use chrono::Utc;
@@ -16,7 +15,6 @@ fn empty_flow(uuid: Uuid) -> JobFlow {
     JobFlow {
         uuid,
         created_at: Utc::now(),
-        work_dir: PathBuf::from("/tmp"),
         tags: BTreeMap::new(),
         jobs: BTreeMap::new(),
     }

@@ -20,6 +20,17 @@ design rationale.
 | SLURM tick | `tick::tick_many` + `SlurmFacade` | `await job_manager.tick_many(...)` |
 | Per-Job facade | `view::CalcView` | `job_manager.CalcView` |
 
+## SP-2 (plan + jobid helpers) capabilities
+
+- `ExperimentPlan` — per-job params sidecar (SP-3 が bash render で使う)
+- `read_plan(path)` / `write_plan(path, plan)` — `plan.toml` atomic rename I/O
+- `build_job_id(step_id, axis_combo)` — JobId 文字列を組み立てる
+- `parse_job_id(s)` — JobId を `{source_step_id, axis_combo}` に分解
+- `validate_step_id(s)` / `validate_job_id(s)` — 命名規約検証
+- `PathResolver.plan_toml(&uuid)` / `.experiment_toml(&uuid)` — path 解決
+
+**experiment.toml DSL は SP-2 に含まない。** sweep / placeholder / parent 解決はユーザーが Python (itertools / f-string / `JobEdge` 直接構築) で書く。spec §1.1 にサンプルあり。
+
 ## Development
 
 Read [`development.md`](./docs/development.md) — setup, build, test, lint, stub regeneration, common pitfalls.

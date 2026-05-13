@@ -2,8 +2,9 @@
 //!
 //! Status is **not** stored inside `JobFlow` to keep the D2 schema
 //! unchanged. Each Job's status lives in
-//! `<flow.work_dir>/<JobId>/.status.toml` (dot-prefixed so it does not
-//! collide with SLURM outputs or user-authored job input files).
+//! `<root>/<flow_uuid>/<JobId>/.status.toml` (dot-prefixed so it does not
+//! collide with SLURM outputs or user-authored job input files). Resolve
+//! that path via `PathResolver::status_file`.
 //!
 //! `StatusEntry.lifecycle` is the user-visible aggregated state (the
 //! 4-state model). `StatusEntry.slurm_status` keeps the raw A1 (state,
