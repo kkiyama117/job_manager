@@ -37,6 +37,12 @@ pub enum JobManagerError {
         job: gaussian_job_shared::entities::workflow::JobId,
     },
 
+    #[error("sbatch submission failed: {source}")]
+    SubmitFailed {
+        #[source]
+        source: anyhow::Error,
+    },
+
     #[error("slurm facade error: {0}")]
     Slurm(String),
 
