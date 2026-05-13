@@ -76,7 +76,7 @@ domain model free of I/O imports, mirroring the same split between
 
 ```
 <root>/                      <- PathResolver.root
-└── <flow_uuid>/             <- = JobFlow.work_dir
+└── <flow_uuid>/             <- PathResolver.flow_dir(&flow.uuid)
     ├── flow.toml            <- JobFlow TOML (D2 schema)
     └── <JobId>/             <- per-Job folder (D2 convention)
         ├── input.gjf        <- user / grammar layer (SP-2)
