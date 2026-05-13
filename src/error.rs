@@ -62,6 +62,9 @@ pub enum JobManagerError {
         reason: String,
     },
 
+    #[error("dependency cycle detected in flow {flow}")]
+    DependencyCycle { flow: uuid::Uuid },
+
     #[error("{0}")]
     Other(String),
 }

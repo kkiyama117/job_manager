@@ -5,6 +5,7 @@
 mod concurrency;
 
 pub mod error;
+pub mod flow;
 pub mod job;
 pub mod jobid;
 pub mod persistence;
