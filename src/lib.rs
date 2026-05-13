@@ -24,6 +24,7 @@ pub use persistence::{
     write_common, write_flow, write_job_run, write_plan,
 };
 pub use plan::ExperimentPlan;
+pub use render::render_batch_bash;
 pub use runner::{Decision, TickResult, decide_transition, tick_many};
 pub use search::{SearchFilter, matches};
 pub use slurm::{InMemoryQuerier, Querier, SlurmQuerier};
