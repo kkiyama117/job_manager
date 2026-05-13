@@ -19,7 +19,8 @@ pub use error::{JobManagerError, SchemaParseError};
 pub use job::{JobRun, Lifecycle};
 pub use jobid::{JobIdParts, build_job_id, parse_job_id, validate_job_id, validate_step_id};
 pub use persistence::{
-    PathResolver, read_flow, read_job_run, read_plan, write_flow, write_job_run, write_plan,
+    PathResolver, read_common, read_flow, read_job_run, read_plan, write_common, write_flow,
+    write_job_run, write_plan,
 };
 pub use plan::ExperimentPlan;
 pub use runner::{Decision, TickResult, decide_transition, tick_many};
