@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use gaussian_job_shared::entities::workflow::{Job, JobFlow, JobId};
 
 use crate::error::JobManagerError;
-use crate::path::PathResolver;
+use crate::persistence::path::PathResolver;
 use crate::status::{StatusEntry, io::read_status};
 
 #[derive(Debug)]

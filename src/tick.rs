@@ -158,7 +158,7 @@ use gaussian_job_shared::entities::workflow::JobId;
 use uuid::Uuid;
 
 use crate::concurrency::parallelism;
-use crate::path::PathResolver;
+use crate::persistence::path::PathResolver;
 use crate::slurm_facade::SlurmFacade;
 use crate::status::{
     StatusEntry,

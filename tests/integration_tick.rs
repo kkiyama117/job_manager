@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use gaussian_job_shared::entities::workflow::JobId;
-use job_manager::path::PathResolver;
+use job_manager::persistence::path::PathResolver;
 use job_manager::slurm_facade::InMemorySlurmFacade;
 use job_manager::status::{
     PerJobStatus, StatusEntry,

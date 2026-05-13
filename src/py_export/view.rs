@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use crate::flow_io::read_flow;
-use crate::path::PathResolver;
+use crate::persistence::path::PathResolver;
 use crate::py_export::path::PyPathResolver;
 use crate::status::io::read_status;
 use crate::view::CalcView;

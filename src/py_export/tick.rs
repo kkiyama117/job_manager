@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 
-use crate::path::PathResolver;
+use crate::persistence::path::PathResolver;
 use crate::py_export::path::PyPathResolver;
 use crate::slurm_facade::A1SlurmFacade;
 use crate::tick::tick_many as inner_tick_many;
