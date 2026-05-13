@@ -69,7 +69,10 @@ pub fn parse_job_id(s: &str) -> Result<JobIdParts<'_>, JobManagerError> {
         return Err(JobManagerError::InvalidJobId(String::new()));
     }
     let mut iter = s.split("__");
-    let source_step_id = iter.next().expect("split yields >=1");
+    // INVARIANT: `str::split` は空文字列に対しても 1 要素 (空文字) を返し、
+    // 区切り文字を含まない文字列でも 1 要素を返す (Rust std 仕様)。`s.is_empty()`
+    // は冒頭で reject 済みなので、ここでは必ず Some が返る。
+    let source_step_id = iter.next().expect("str::split always yields >=1 item");
     validate_step_id(source_step_id)?;
 
     let mut axis_combo: Vec<(&str, usize)> = Vec::new();
