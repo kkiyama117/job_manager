@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use pyo3::prelude::*;
-use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use crate::plan::{ExperimentPlan, io as plan_io};
 
@@ -64,15 +64,11 @@ impl PyExperimentPlan {
     }
 }
 
-#[gen_stub_pyfunction]
-#[pyfunction]
 pub(crate) fn read_plan(path: PathBuf) -> PyResult<PyExperimentPlan> {
     let plan = plan_io::read_plan(&path).map_err(PyErr::from)?;
     Ok(PyExperimentPlan { inner: plan })
 }
 
-#[gen_stub_pyfunction]
-#[pyfunction]
 pub(crate) fn write_plan(path: PathBuf, plan: PyExperimentPlan) -> PyResult<()> {
     plan_io::write_plan(&path, &plan.inner).map_err(PyErr::from)?;
     Ok(())
