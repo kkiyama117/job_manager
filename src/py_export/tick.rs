@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 
 use crate::persistence::path::PathResolver;
 use crate::py_export::path::PyPathResolver;
-use crate::slurm_facade::A1SlurmFacade;
+use crate::slurm::SlurmQuerier;
 use crate::tick::tick_many as inner_tick_many;
 
 /// Tick a list of `(flow_uuid: str, job_id: str, slurm_jobid: int)` targets.
@@ -49,7 +49,7 @@ pub fn tick_many<'py>(
             .collect::<Result<_, _>>()?;
 
         let slurm_cmd = srun_cmd.map(slurm_async_runner::SlurmCmd::new);
-        let slurm = A1SlurmFacade::new(Arc::new(slurm_async_runner::SlurmManager::new(slurm_cmd)));
+        let slurm = SlurmQuerier::new(Arc::new(slurm_async_runner::SlurmManager::new(slurm_cmd)));
         let results = inner_tick_many(&parsed, &slurm, resolver_inner.as_ref()).await;
 
         Python::attach(|py| {

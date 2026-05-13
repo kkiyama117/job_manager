@@ -161,7 +161,7 @@ use crate::concurrency::parallelism;
 use crate::job::run::JobRun;
 use crate::persistence::job_run::{read_job_run, write_job_run};
 use crate::persistence::path::PathResolver;
-use crate::slurm_facade::SlurmFacade;
+use crate::slurm::Querier;
 
 #[derive(Debug, Clone)]
 pub struct TickResult {
@@ -248,11 +248,11 @@ fn process_one(
 /// pairing should key by `(flow_uuid, job_id)`.
 pub async fn tick_many(
     targets: &[(Uuid, JobId, u64)],
-    slurm: &dyn SlurmFacade,
+    slurm: &dyn Querier,
     resolver: &PathResolver,
 ) -> Vec<TickResult> {
     let jobids: Vec<u64> = targets.iter().map(|(_, _, j)| *j).collect();
-    let states: HashMap<u64, JobStatus> = match slurm.query_states_batch(&jobids).await {
+    let states: HashMap<u64, JobStatus> = match slurm.query(&jobids).await {
         Ok(m) => m,
         Err(e) => {
             return targets
@@ -404,7 +404,7 @@ mod tests {
     }
 
     use crate::persistence::job_run::{read_job_run, write_job_run};
-    use crate::slurm_facade::InMemorySlurmFacade;
+    use crate::slurm::InMemoryQuerier;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -426,7 +426,7 @@ mod tests {
 
         let mut m = HashMap::new();
         m.insert(99u64, JobStatus::new(JobState::Running));
-        let slurm = InMemorySlurmFacade::new(m);
+        let slurm = InMemoryQuerier::new(m);
 
         let results = tick_many(&[(flow_uuid, job_id.clone(), 99)], &slurm, &resolver).await;
         assert_eq!(results.len(), 1);
@@ -467,7 +467,7 @@ mod tests {
             55u64,
             JobStatus::with_reason(JobState::Timeout, JobReason::TimeLimit),
         );
-        let slurm = InMemorySlurmFacade::new(m);
+        let slurm = InMemoryQuerier::new(m);
 
         let results = tick_many(&[(flow_uuid, job_id.clone(), 55)], &slurm, &resolver).await;
         assert_eq!(results[0].previous, Some(Lifecycle::Failed));
@@ -496,7 +496,7 @@ mod tests {
         };
         write_job_run(&resolver.status_file(&flow_uuid, &job_id), &initial).unwrap();
 
-        let slurm = InMemorySlurmFacade::new(HashMap::new()); // no entry for 77
+        let slurm = InMemoryQuerier::new(HashMap::new()); // no entry for 77
         let results = tick_many(&[(flow_uuid, job_id.clone(), 77)], &slurm, &resolver).await;
         assert_eq!(results[0].previous, Some(Lifecycle::Running));
         assert_eq!(results[0].new, Some(Lifecycle::Running));
