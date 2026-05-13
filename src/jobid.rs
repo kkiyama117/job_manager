@@ -157,6 +157,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_job_id_rejects_reserved_names() {
+        // M-5: 予約名は step_id だけでなく JobId 全体としても reject されること
+        // (validate_job_id → parse_job_id → validate_step_id の連鎖を明示的に検証)。
+        for reserved in &["flow", "plan", "experiment", "derived", "status"] {
+            assert!(
+                matches!(
+                    validate_job_id(reserved),
+                    Err(JobManagerError::ReservedJobId(_))
+                ),
+                "should reject reserved JobId '{reserved}'"
+            );
+        }
+    }
+
+    #[test]
     fn build_no_sweep_returns_step_id() {
         assert_eq!(build_job_id("opt", &[]), "opt");
     }
