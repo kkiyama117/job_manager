@@ -90,6 +90,8 @@ pyo3-stub-gen = { git = "https://github.com/Jij-Inc/pyo3-stub-gen", rev = "bcfdb
 tempfile = "3.10"
 rstest = "0.23"
 tokio = { version = "1.0", features = ["test-util"] }
+assert_cmd = "2.0"
+predicates = "3.0"
 
 [features]
 default = ["pyo3", "stub_gen"]
