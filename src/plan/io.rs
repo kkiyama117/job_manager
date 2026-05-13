@@ -16,7 +16,16 @@ pub fn read_plan(path: &Path) -> Result<ExperimentPlan, JobManagerError> {
     })
 }
 
+/// Write `plan` to `path` atomically (write to `<path>.tmp` then rename).
+/// Creates parent directories if missing (対称: `flow_io::write_flow`)。
 pub fn write_plan(path: &Path, plan: &ExperimentPlan) -> Result<(), JobManagerError> {
+    // M-4: write_flow と同じく親 dir を自動作成し、呼び側の create_dir_all 重複を解消。
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| JobManagerError::Io {
+            path: parent.to_path_buf(),
+            source: e,
+        })?;
+    }
     let text = toml::to_string_pretty(plan)?;
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, text).map_err(|e| JobManagerError::Io {
@@ -93,6 +102,17 @@ route = "# x"
 "##;
         let result: Result<ExperimentPlan, _> = toml::from_str(bad);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_creates_parent_dirs() {
+        // M-4: write_flow と対称に、親ディレクトリを自動作成する。
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("a/b/c");
+        let path = nested.join("plan.toml");
+        let p = sample_plan();
+        write_plan(&path, &p).unwrap();
+        assert!(path.exists());
     }
 
     #[test]
