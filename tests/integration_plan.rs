@@ -71,8 +71,8 @@ fn build_and_persist_plan_round_trip() {
 #[test]
 fn python_authoring_pattern_works_in_rust() {
     // Mimics spec §1.1 Python authoring flow in Rust.
-    let compounds = vec!["benzene", "toluene", "p-xylene"];
-    let methods = vec![("b3lyp", "B3LYP"), ("m062x", "M06-2X")];
+    let compounds = ["benzene", "toluene", "p-xylene"];
+    let methods = [("b3lyp", "B3LYP"), ("m062x", "M06-2X")];
 
     let mut jobs: BTreeMap<JobId, Job> = BTreeMap::new();
     let mut params: BTreeMap<JobId, BTreeMap<String, toml::Value>> = BTreeMap::new();
