@@ -2,6 +2,7 @@
 //!
 //! `executor` (sbatch submit) and `querier` (sacct query) separated by 2-way responsibility.
 
+pub mod dependency;
 pub mod executor;
 pub mod querier;
 
