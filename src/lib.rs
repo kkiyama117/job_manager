@@ -18,6 +18,7 @@ pub mod view;
 pub mod walk;
 
 pub use error::{JobManagerError, SchemaParseError};
+pub use flow::FlowRun;
 pub use job::{JobRun, Lifecycle};
 pub use jobid::{JobIdParts, build_job_id, parse_job_id, validate_job_id, validate_step_id};
 pub use persistence::{
