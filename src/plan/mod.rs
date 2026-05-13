@@ -8,6 +8,7 @@ pub mod io;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+#[must_use]
 pub struct ExperimentPlan {
     /// Map key は D2 `JobId` newtype。value は任意の TOML 値。
     pub jobs: BTreeMap<JobId, BTreeMap<String, toml::Value>>,

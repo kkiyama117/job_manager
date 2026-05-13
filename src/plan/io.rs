@@ -5,6 +5,8 @@ use std::path::Path;
 use crate::error::JobManagerError;
 use crate::plan::ExperimentPlan;
 
+/// Read an `ExperimentPlan` from a TOML file at `path`.
+#[must_use = "read_plan returns the parsed ExperimentPlan; ignoring it drops the data"]
 pub fn read_plan(path: &Path) -> Result<ExperimentPlan, JobManagerError> {
     let text = std::fs::read_to_string(path).map_err(|e| JobManagerError::Io {
         path: path.to_path_buf(),
