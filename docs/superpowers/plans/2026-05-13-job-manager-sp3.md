@@ -1611,6 +1611,123 @@ use crate::jobid::parse_job_id;
 use crate::path::PathResolver;
 use crate::plan::ExperimentPlan;
 use crate::render::render_batch_bash;
+// `crate::status` は src/status/{mod.rs,io.rs} で定義済み (SP-1):
+//   - StatusEntry { lifecycle, updated_at, slurm_jobid, slurm_status, note }
+//   - PerJobStatus { Queued, Running, Done, Failed }
+//   - io::{read_status, write_status}
+
+/// effective_config から SbatchCmd を組み立てる純粋関数 (副作用なし)。
+/// 依存 (`dependency` フィールド) は別途 [`build_dependency`] で設定する。
+fn build_sbatch_cmd(
+    effective_config: &slurm_async_runner::entities::slurm::SlurmJobConfig,
+    script: &std::path::Path,
+    sbatch_bin: &str,
+) -> SbatchCmd {
+    let mut cmd = SbatchCmd::new(script.to_path_buf());
+    cmd.sbatch_bin = sbatch_bin.to_string();
+    cmd.partition = if effective_config.partition.is_empty() {
+        None
+    } else {
+        Some(effective_config.partition.clone())
+    };
+    cmd.time_limit = effective_config.time_limit.clone();
+    cmd.rsc = effective_config.resource_spec.clone();
+    cmd.output = effective_config
+        .log_stdout
+        .as_ref()
+        .map(|p| p.display().to_string());
+    cmd.error = effective_config
+        .log_stderr
+        .as_ref()
+        .map(|p| p.display().to_string());
+    cmd.job_name = effective_config.job_name.clone();
+    cmd.array_spec = effective_config.array_spec.clone();
+    cmd.mail_user = effective_config.mail_user.clone();
+    cmd.mail_types = effective_config.mail_types.clone();
+    cmd.comment = effective_config.comment.clone();
+    cmd
+}
+
+/// JobEdge[] と submit 済み jobid の map から `SlurmDependency` を構築する。
+/// parent が未 submit (= map に無い) の場合は除外。何も残らなければ `None`。
+fn build_dependency(
+    parents: &[gaussian_job_shared::entities::workflow::JobEdge],
+    submitted: &BTreeMap<JobId, u64>,
+    job: &JobId,
+) -> Result<Option<SlurmDependency>, JobManagerError> {
+    let parent_deps: Vec<(u64, slurm_async_runner::entities::slurm::DependencyType)> = parents
+        .iter()
+        .filter_map(|edge| {
+            submitted
+                .get(&edge.from)
+                .map(|jobid| (*jobid, edge.kind.clone()))
+        })
+        .collect();
+    if parent_deps.is_empty() {
+        return Ok(None);
+    }
+    let dep_str = parent_deps
+        .iter()
+        .map(|(j, k)| format!("{k}:{j}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let dep = dep_str
+        .parse::<SlurmDependency>()
+        .map_err(|e: <SlurmDependency as std::str::FromStr>::Err| {
+            JobManagerError::SubmitFailed {
+                job: job.clone(),
+                source: anyhow::anyhow!("dependency parse: {e}"),
+            }
+        })?;
+    Ok(Some(dep))
+}
+
+/// `<job_dir>/batch.bash` を atomic ではないが create_dir_all 付きで書く。
+fn write_batch_bash(path: &std::path::Path, body: &str) -> Result<(), JobManagerError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| JobManagerError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    std::fs::write(path, body).map_err(|source| JobManagerError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// 単一 job を sbatch に投入し、`.status.toml` を Queued + slurm_jobid で書く。
+async fn submit_one(
+    resolver: &PathResolver,
+    flow_uuid: &uuid::Uuid,
+    jid: &JobId,
+    cmd: SbatchCmd,
+) -> Result<u64, JobManagerError> {
+    let manager = SbatchManager::new(cmd);
+    let handle = manager
+        .spawn()
+        .await
+        .map_err(|e| JobManagerError::SubmitFailed {
+            job: jid.clone(),
+            source: anyhow::anyhow!(e),
+        })?;
+    // A1 `SbatchJobHandle::jobid(&self) -> Option<u64>` (handle.rs:218)。
+    // None は SLURM が jobid を返さなかった異常系 — sentinel 0 は使わず明示的に fail。
+    let slurm_jobid = handle.jobid().ok_or_else(|| JobManagerError::SubmitFailed {
+        job: jid.clone(),
+        source: anyhow::anyhow!("sbatch returned no jobid"),
+    })?;
+    let status_path = resolver.status_file(flow_uuid, jid);
+    let entry = crate::status::StatusEntry {
+        lifecycle: crate::status::PerJobStatus::Queued,
+        updated_at: chrono::Utc::now(),
+        slurm_jobid: Some(slurm_jobid),
+        slurm_status: None,
+        note: None,
+    };
+    crate::status::io::write_status(&status_path, &entry)?;
+    Ok(slurm_jobid)
+}
 
 /// 各 JobId をトポロジカル順に submit する。
 ///
@@ -1627,6 +1744,7 @@ pub async fn submit_chain(
 ) -> Result<BTreeMap<JobId, u64>, JobManagerError> {
     let order = topological_sort(flow)?;
     let mut submitted: BTreeMap<JobId, u64> = BTreeMap::new();
+    let sbatch_bin = sbatch_bin.unwrap_or("sbatch");
 
     for jid in order {
         let job = flow
@@ -1640,103 +1758,30 @@ pub async fn submit_chain(
             }
         })?;
 
-        // --- effective config ---
         let effective_config = match common {
             Some(c) => common::merge_with_defaults(c, &job.spec.config),
             None => job.spec.config.clone(),
         };
 
-        // --- render batch.bash ---
         let parts = parse_job_id(&jid.0)?;
         let body = render_batch_bash(&flow.uuid, &jid, &parts, params, &job.spec.body);
         let batch_path: PathBuf = resolver.batch_bash(&flow.uuid, &jid);
-        if let Some(parent) = batch_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| JobManagerError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-        std::fs::write(&batch_path, &body).map_err(|source| JobManagerError::Io {
-            path: batch_path.clone(),
-            source,
-        })?;
+        write_batch_bash(&batch_path, &body)?;
 
         if dry_run {
             continue;
         }
 
-        // --- build SbatchCmd from effective_config + dep ---
-        let mut cmd = SbatchCmd::new(&batch_path);
-        cmd.sbatch_bin = sbatch_bin.unwrap_or("sbatch").to_string();
-        cmd.partition = if effective_config.partition.is_empty() {
-            None
-        } else {
-            Some(effective_config.partition.clone())
-        };
-        cmd.time_limit = effective_config.time_limit.clone();
-        cmd.rsc = effective_config.resource_spec.clone();
-        cmd.output = effective_config
-            .log_stdout
-            .as_ref()
-            .map(|p| p.display().to_string());
-        cmd.error = effective_config
-            .log_stderr
-            .as_ref()
-            .map(|p| p.display().to_string());
-        cmd.job_name = effective_config.job_name.clone();
-        cmd.array_spec = effective_config.array_spec.clone();
-        cmd.mail_user = effective_config.mail_user.clone();
-        cmd.mail_types = effective_config.mail_types.clone();
-        cmd.comment = effective_config.comment.clone();
+        let mut cmd = build_sbatch_cmd(&effective_config, &batch_path, sbatch_bin);
+        cmd.dependency = build_dependency(&job.parents, &submitted, &jid)?;
 
-        // --- dep from JobEdge[] ---
-        let parent_deps: Vec<(u64, slurm_async_runner::entities::slurm::DependencyType)> = job
-            .parents
-            .iter()
-            .filter_map(|edge| {
-                submitted
-                    .get(&edge.from)
-                    .map(|jobid| (*jobid, edge.kind.clone()))
-            })
-            .collect();
-        if !parent_deps.is_empty() {
-            let dep_str = parent_deps
-                .iter()
-                .map(|(j, k)| format!("{k}:{j}"))
-                .collect::<Vec<_>>()
-                .join(",");
-            cmd.dependency = Some(
-                dep_str
-                    .parse::<SlurmDependency>()
-                    .map_err(|e: <SlurmDependency as std::str::FromStr>::Err| {
-                        JobManagerError::SubmitFailed {
-                            job: jid.clone(),
-                            source: anyhow::anyhow!("dependency parse: {e}"),
-                        }
-                    })?,
-            );
-        }
-
-        let manager = SbatchManager::new(cmd);
-        let handle = manager
-            .spawn()
-            .await
-            .map_err(|e| JobManagerError::SubmitFailed {
-                job: jid.clone(),
-                source: anyhow::anyhow!(e),
-            })?;
-        // A1 SbatchJobHandle の jobid 取得方法は実装時に
-        // `cargo doc --open --package slurm_async_runner` で確認 (snapshot.lifecycle.jobid
-        // または handle.jobid() の可能性あり)。
-        let slurm_jobid: u64 = handle.snapshot.lifecycle.jobid.unwrap_or(0);
-        submitted.insert(jid.clone(), slurm_jobid);
+        let slurm_jobid = submit_one(resolver, &flow.uuid, &jid, cmd).await?;
+        submitted.insert(jid, slurm_jobid);
     }
 
     Ok(submitted)
 }
 ```
-
-**注**: `SbatchJobHandle.snapshot.lifecycle.jobid` は A1 API のフィールド推定。実装時に正確なシグネチャを `cargo doc --open --package slurm_async_runner` で確認し、必要なら `handle.jobid()` 等のメソッドに差し替える。差し替えが必要だった場合はこの注記を更新。
 
 - [ ] **Step 4: Run new submit_chain tests**
 
@@ -2173,8 +2218,8 @@ enum Cmd {
     Run {
         /// flow dir: absolute path or bare uuid
         target: String,
-        #[arg(long)]
-        force: bool,
+        // NOTE(SP-3 followup): `--force` を将来追加予定 (既存 batch.bash を保護する選択肢)。
+        // 現状は常に overwrite するため、フラグは未実装 (clap 表面に出さない)。
     },
     /// Submit a flow chain to SLURM (or dry-run if --dry-run).
     Submit {
@@ -2224,7 +2269,7 @@ fn resolve_target_uuid(target: &str, root: &PathBuf) -> Result<uuid::Uuid> {
     }
 }
 
-async fn cmd_run(root: PathBuf, target: &str, _force: bool) -> Result<()> {
+async fn cmd_run(root: PathBuf, target: &str) -> Result<()> {
     let uuid = resolve_target_uuid(target, &root)?;
     let resolver = PathResolver::new(root);
     let flow = read_flow(&resolver.flow_toml(&uuid))?;
@@ -2274,17 +2319,16 @@ fn cmd_show(root: PathBuf, target: &str) -> Result<()> {
     println!("flow: {}", uuid);
     println!("created_at: {}", flow.created_at);
     println!("jobs: {}", flow.jobs.len());
-    for (jid, _) in &flow.jobs {
+    for jid in flow.jobs.keys() {
         let status_path = resolver.status_file(&uuid, jid);
         let st = if status_path.exists() {
-            std::fs::read_to_string(&status_path)
-                .unwrap_or_default()
-                .lines()
-                .find(|l| l.starts_with("status"))
-                .unwrap_or("status = ?")
-                .to_string()
+            let entry = job_manager::status::io::read_status(&status_path)?;
+            match entry.slurm_jobid {
+                Some(j) => format!("{:?} (slurm_jobid={j})", entry.lifecycle),
+                None => format!("{:?}", entry.lifecycle),
+            }
         } else {
-            "status = <pending>".to_string()
+            "<pending>".to_string()
         };
         println!("  {}  {}", jid.0, st);
     }
@@ -2293,25 +2337,20 @@ fn cmd_show(root: PathBuf, target: &str) -> Result<()> {
 
 async fn cmd_tick(root: PathBuf, target: &str) -> Result<()> {
     // SP-1 tick.rs を CLI から呼ぶための薄い wrap。
-    // 既存 tick API は (resolver, targets, srun_cmd) を取るので、status.toml に
-    // slurm_jobid を持っているものを集めて回す。
+    // SP-1 `status::io::read_status` を使い、`.status.toml` の slurm_jobid を集める。
     let uuid = resolve_target_uuid(target, &root)?;
     let resolver = PathResolver::new(root);
     let flow = read_flow(&resolver.flow_toml(&uuid))?;
 
     let mut targets: Vec<(String, String, u64)> = Vec::new();
-    for (jid, _) in &flow.jobs {
+    for jid in flow.jobs.keys() {
         let sp = resolver.status_file(&uuid, jid);
         if !sp.exists() {
             continue;
         }
-        let txt = std::fs::read_to_string(&sp).unwrap_or_default();
-        if let Some(line) = txt.lines().find(|l| l.starts_with("slurm_jobid")) {
-            if let Some(eq) = line.find('=') {
-                if let Ok(jobid) = line[eq + 1..].trim().parse::<u64>() {
-                    targets.push((uuid.to_string(), jid.0.clone(), jobid));
-                }
-            }
+        let entry = job_manager::status::io::read_status(&sp)?;
+        if let Some(jobid) = entry.slurm_jobid {
+            targets.push((uuid.to_string(), jid.0.clone(), jobid));
         }
     }
     if targets.is_empty() {
@@ -2324,21 +2363,21 @@ async fn cmd_tick(root: PathBuf, target: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_search(root: PathBuf, program: Option<&str>) -> Result<()> {
+async fn cmd_search(root: PathBuf, program: Option<&str>) -> Result<()> {
+    use futures::StreamExt;
     let resolver = PathResolver::new(root);
-    let flows = job_manager::walk::walk_flows(resolver.root())?;
-    for entry in flows {
+    // `walk_flows: impl Stream<Item = Result<JobFlow, _>> + Send + 'static`
+    // (src/walk.rs:43)。Stream を pin して next().await で消費する。
+    let s = job_manager::walk::walk_flows(resolver.root());
+    let mut s = std::pin::pin!(s);
+    while let Some(item) = s.next().await {
+        let flow = item?;
         if let Some(p) = program {
-            let matches = entry
-                .flow
-                .jobs
-                .values()
-                .any(|j| j.spec.program.0 == p);
-            if !matches {
+            if !flow.jobs.values().any(|j| j.spec.program.0 == p) {
                 continue;
             }
         }
-        println!("{}\t{}", entry.flow.uuid, entry.flow.created_at);
+        println!("{}\t{}", flow.uuid, flow.created_at);
     }
     Ok(())
 }
@@ -2354,7 +2393,7 @@ async fn main() -> ExitCode {
         }
     };
     let result: Result<()> = match cli.cmd {
-        Cmd::Run { target, force } => cmd_run(root, &target, force).await,
+        Cmd::Run { target } => cmd_run(root, &target).await,
         Cmd::Submit {
             target,
             dry_run,
@@ -2362,7 +2401,7 @@ async fn main() -> ExitCode {
         } => cmd_submit(root, &target, dry_run, sbatch.as_deref()).await,
         Cmd::Show { target } => cmd_show(root, &target),
         Cmd::Tick { target } => cmd_tick(root, &target).await,
-        Cmd::Search { program } => cmd_search(root, program.as_deref()),
+        Cmd::Search { program } => cmd_search(root, program.as_deref()).await,
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -2693,7 +2732,14 @@ Phase 0 D2 PR が merge されてから job-manager SP-3 PR (PR #10) を merge �
 ### Placeholder scan
 
 `grep -nE "TBD|implement later|fill in details|add appropriate error handling" docs/superpowers/plans/2026-05-13-job-manager-sp3.md` 想定: 0 件。
-本文中の「実装時 cargo doc --open で確認」注記は **A1 の正確な API は実装時に確認が必要だが、それ以外は完全に書ききっている** ことを示す注釈 (placeholder ではない)。Task C.3 の `handle.snapshot.lifecycle.jobid` の差し替え可能性、Task D.2 の `walk::walk_flows` 戻り型確認は実装時 verification 項目。
+
+PR #10 self-review (2026-05-13) で発見した実 API 不一致は plan を直接修正済み:
+- Task C.3 の jobid 取得は `handle.jobid()` 経由 (`handle.snapshot.lifecycle.jobid` ではなく)
+- Task D.2 の `cmd_search` は `walk_flows` の `Stream` 戻り型に合わせて `async fn` + `futures::StreamExt::next().await` で消費
+- Task C.3 の `submit_chain` は `build_sbatch_cmd` / `build_dependency` / `write_batch_bash` / `submit_one` の 4 ヘルパーに分割し、本体を 50 行以下に圧縮
+- Task D.2 の `cmd_tick` / `cmd_show` は `crate::status::io::read_status` を経由 (ad-hoc TOML パース廃止)
+
+「NOTE(SP-3 followup)」コメント (`--force` 等) は意図的な future-work マーカーで placeholder ではない。
 
 ### Type consistency
 
