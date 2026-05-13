@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use crate::filter::SearchFilter as Inner;
 use crate::py_export::status::PyLifecycle;
+use crate::search::SearchFilter as Inner;
 
 #[gen_stub_pyclass]
 #[pyclass(name = "SearchFilter", get_all, set_all, from_py_object)]
