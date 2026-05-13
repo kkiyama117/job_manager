@@ -19,9 +19,12 @@ impl From<JobManagerError> for PyErr {
             | JobManagerError::StatusNotFound { .. } => {
                 PyFileNotFoundError::new_err(value.to_string())
             }
-            JobManagerError::TomlParse { .. } | JobManagerError::TomlSer(_) => {
-                PyValueError::new_err(value.to_string())
-            }
+            JobManagerError::TomlParse { .. }
+            | JobManagerError::TomlSer(_)
+            | JobManagerError::InvalidStepId(_)
+            | JobManagerError::InvalidJobId(_)
+            | JobManagerError::ReservedJobId(_)
+            | JobManagerError::JobIdParseError { .. } => PyValueError::new_err(value.to_string()),
             _ => PyRuntimeError::new_err(value.to_string()),
         }
     }
