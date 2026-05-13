@@ -19,6 +19,26 @@ pub struct FlowRun {
 }
 
 impl FlowRun {
+    pub fn read(
+        resolver: &crate::persistence::PathResolver,
+        flow_uuid: uuid::Uuid,
+    ) -> Result<Self, JobManagerError> {
+        let flow = crate::persistence::read_flow(&resolver.flow_toml(&flow_uuid))?;
+        let plan = crate::persistence::read_plan(&resolver.plan_toml(&flow_uuid))?;
+        let common_path = resolver.common_toml();
+        let common = if common_path.exists() {
+            Some(crate::persistence::read_common(&common_path)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            flow_uuid,
+            flow,
+            plan,
+            common,
+        })
+    }
+
     pub fn topological_order(&self) -> Result<Vec<JobId>, JobManagerError> {
         topology::topological_order(&self.flow.jobs, self.flow_uuid)
     }
@@ -156,5 +176,62 @@ mod tests {
         let fr = fr_with_2_jobs();
         let cfg = fr.effective_config(&JobId("b".to_string())).unwrap();
         assert_eq!(cfg.partition, "short");
+    }
+
+    #[test]
+    fn read_constructs_from_disk_with_common() {
+        use crate::persistence::{PathResolver, write_common, write_flow, write_plan};
+        use gaussian_job_shared::config::common::{CommonConfig, DirectoryConfig};
+        use std::path::PathBuf;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let resolver = PathResolver::new(dir.path());
+        let fr_src = fr_with_2_jobs();
+        let uuid = uuid::Uuid::nil();
+
+        let common = CommonConfig {
+            slurm_default: SlurmJobConfig {
+                partition: "long".to_string(),
+                time_limit: None,
+                log_stdout: None,
+                log_stderr: None,
+                comment: None,
+                job_name: None,
+                array_spec: None,
+                dependency: None,
+                mail_user: None,
+                mail_types: None,
+                resource_spec: None,
+            },
+            directories: DirectoryConfig {
+                project_root: PathBuf::from(dir.path()),
+            },
+        };
+        write_common(&resolver.common_toml(), &common).unwrap();
+        write_flow(&resolver.flow_toml(&uuid), &fr_src.flow).unwrap();
+        write_plan(&resolver.plan_toml(&uuid), &fr_src.plan).unwrap();
+
+        let fr = FlowRun::read(&resolver, uuid).unwrap();
+        assert_eq!(fr.flow_uuid, uuid);
+        assert!(fr.common.is_some());
+        assert_eq!(fr.flow.jobs.len(), 2);
+    }
+
+    #[test]
+    fn read_works_without_common_toml() {
+        use crate::persistence::{PathResolver, write_flow, write_plan};
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let resolver = PathResolver::new(dir.path());
+        let fr_src = fr_with_2_jobs();
+        let uuid = uuid::Uuid::nil();
+
+        write_flow(&resolver.flow_toml(&uuid), &fr_src.flow).unwrap();
+        write_plan(&resolver.plan_toml(&uuid), &fr_src.plan).unwrap();
+
+        let fr = FlowRun::read(&resolver, uuid).unwrap();
+        assert!(fr.common.is_none());
     }
 }
