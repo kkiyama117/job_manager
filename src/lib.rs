@@ -9,6 +9,7 @@ pub mod job;
 pub mod jobid;
 pub mod persistence;
 pub mod plan;
+pub mod render;
 pub mod runner;
 pub mod search;
 pub mod slurm;
