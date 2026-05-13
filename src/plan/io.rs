@@ -28,14 +28,22 @@ pub fn write_plan(path: &Path, plan: &ExperimentPlan) -> Result<(), JobManagerEr
     }
     let text = toml::to_string_pretty(plan)?;
     let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, text).map_err(|e| JobManagerError::Io {
-        path: tmp.clone(),
-        source: e,
-    })?;
-    std::fs::rename(&tmp, path).map_err(|e| JobManagerError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })
+    let result = std::fs::write(&tmp, text)
+        .map_err(|e| JobManagerError::Io {
+            path: tmp.clone(),
+            source: e,
+        })
+        .and_then(|()| {
+            std::fs::rename(&tmp, path).map_err(|e| JobManagerError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })
+        });
+    if result.is_err() {
+        // L-3: write/rename どちらの失敗でも tmp が残る可能性があるため best-effort で削除。
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -113,6 +121,20 @@ route = "# x"
         let p = sample_plan();
         write_plan(&path, &p).unwrap();
         assert!(path.exists());
+    }
+
+    #[test]
+    fn write_plan_cleans_up_tmp_on_rename_failure() {
+        // L-3: rename 失敗時に .toml.tmp が残らないことを検証。
+        // target が既存ディレクトリだと rename(file, dir) は失敗するので、それで誘発する。
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("plan.toml");
+        std::fs::create_dir_all(&path).unwrap();
+        let p = sample_plan();
+        let result = write_plan(&path, &p);
+        assert!(result.is_err());
+        let tmp = path.with_extension("toml.tmp");
+        assert!(!tmp.exists(), "tmp leaked at {tmp:?}");
     }
 
     #[test]
