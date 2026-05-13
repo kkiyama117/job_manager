@@ -7,6 +7,8 @@ from itertools import product
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from job_manager import (
     ExperimentPlan,
     PathResolver,
@@ -102,3 +104,18 @@ def test_pathresolver_experiment_toml_reserved_for_future():
         uid = uuid4()
         path = resolver.experiment_toml(str(uid))
         assert "experiment.toml" in str(path)
+
+
+def test_experiment_plan_rejects_invalid_job_id_char():
+    """M-1: 不正文字 (`..`, `/`) を含む job_id key は ValueError を raise する。"""
+    with pytest.raises(ValueError):
+        ExperimentPlan({"../evil": {"route": "# x"}})
+    with pytest.raises(ValueError):
+        ExperimentPlan({"opt/sub": {"route": "# x"}})
+
+
+def test_experiment_plan_rejects_reserved_job_id():
+    """M-1: 予約名 (flow/plan/experiment/derived/status) を job_id key として拒否。"""
+    for reserved in ("flow", "plan", "experiment", "derived", "status"):
+        with pytest.raises(ValueError):
+            ExperimentPlan({reserved: {"route": "# x"}})

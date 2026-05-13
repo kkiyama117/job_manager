@@ -30,6 +30,10 @@ impl PyExperimentPlan {
         let mut out_jobs: BTreeMap<JobId, BTreeMap<String, toml::Value>> = BTreeMap::new();
         for (k, v) in jobs.iter() {
             let jid_str: String = k.extract()?;
+            // M-1: job_id key を validate_job_id でゲートする。
+            // 不正文字 / 予約名を含む key を plan.toml に挿入させない
+            // (SP-3 で job_id をパス構築に再利用するため事前に弾く)。
+            crate::jobid::validate_job_id(&jid_str).map_err(PyErr::from)?;
             let params_dict: Bound<'_, pyo3::types::PyDict> = v.cast_into()?;
             let mut params: BTreeMap<String, toml::Value> = BTreeMap::new();
             for (pk, pv) in params_dict.iter() {
