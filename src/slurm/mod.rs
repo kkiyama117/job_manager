@@ -5,5 +5,5 @@
 pub mod executor;
 pub mod querier;
 
-pub use executor::{Executor, SbatchExecutor};
+pub use executor::{DryRunExecutor, Executor, SbatchExecutor};
 pub use querier::{InMemoryQuerier, Querier, SlurmQuerier};

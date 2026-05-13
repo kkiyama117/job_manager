@@ -27,7 +27,7 @@ pub use plan::ExperimentPlan;
 pub use render::render_batch_bash;
 pub use runner::{Decision, TickResult, decide_transition, tick_many};
 pub use search::{SearchFilter, matches};
-pub use slurm::executor::{Executor, SbatchExecutor};
+pub use slurm::executor::{DryRunExecutor, Executor, SbatchExecutor};
 pub use slurm::{InMemoryQuerier, Querier, SlurmQuerier};
 pub use view::CalcView;
 pub use walk::walk_flows;
