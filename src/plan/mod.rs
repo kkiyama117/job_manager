@@ -4,8 +4,6 @@ use std::collections::BTreeMap;
 
 use gaussian_job_shared::entities::workflow::JobId;
 
-pub mod io;
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 #[must_use]

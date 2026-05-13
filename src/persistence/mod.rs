@@ -4,6 +4,8 @@
 
 pub mod flow;
 pub mod path;
+pub mod plan;
 
 pub use flow::{read_flow, write_flow};
 pub use path::PathResolver;
+pub use plan::{read_plan, write_plan};
