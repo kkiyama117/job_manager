@@ -42,6 +42,17 @@ impl PathResolver {
         self.flow_dir(flow_uuid).join("flow.toml")
     }
 
+    pub fn plan_toml(&self, flow_uuid: &Uuid) -> PathBuf {
+        self.flow_dir(flow_uuid).join("plan.toml")
+    }
+
+    /// 将来、ユーザーが experiment authoring の Python script を flow dir に保存
+    /// したい場合の慣用 path。SP-2 では使わない (SP-2 は experiment.toml DSL を
+    /// 実装しないため)。
+    pub fn experiment_toml(&self, flow_uuid: &Uuid) -> PathBuf {
+        self.flow_dir(flow_uuid).join("experiment.toml")
+    }
+
     /// `<flow_dir>/<JobId>/` — D2's per-Job folder. SLURM stdout/stderr,
     /// rendered .bash, input files all live here. No `jobs/` middle layer.
     pub fn job_dir(&self, flow_uuid: &Uuid, job_id: &JobId) -> PathBuf {
@@ -99,5 +110,22 @@ mod tests {
             r.status_file(&u, &j),
             PathBuf::from(format!("/work/{u}/g16/.status.toml"))
         );
+    }
+
+    #[test]
+    fn plan_toml_path_under_flow_dir() {
+        let r = PathResolver::new(PathBuf::from("/root"));
+        let uuid = Uuid::parse_str("0193a8c0-0000-7000-8000-000000000000").unwrap();
+        let p = r.plan_toml(&uuid);
+        assert!(p.ends_with("plan.toml"));
+        assert!(p.starts_with("/root"));
+    }
+
+    #[test]
+    fn experiment_toml_path_under_flow_dir() {
+        let r = PathResolver::new(PathBuf::from("/root"));
+        let uuid = Uuid::nil();
+        let p = r.experiment_toml(&uuid);
+        assert!(p.ends_with("experiment.toml"));
     }
 }
