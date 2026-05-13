@@ -6,7 +6,6 @@ mod concurrency;
 
 pub mod error;
 pub mod filter;
-pub mod flow_io;
 pub mod jobid;
 pub mod persistence;
 pub mod plan;
@@ -18,9 +17,8 @@ pub mod walk;
 
 pub use error::{JobManagerError, SchemaParseError};
 pub use filter::{SearchFilter, matches};
-pub use flow_io::{read_flow, write_flow};
 pub use jobid::{JobIdParts, build_job_id, parse_job_id, validate_job_id, validate_step_id};
-pub use persistence::PathResolver;
+pub use persistence::{PathResolver, read_flow, write_flow};
 pub use plan::ExperimentPlan;
 pub use plan::io::{read_plan, write_plan};
 pub use slurm_facade::{A1SlurmFacade, InMemorySlurmFacade, SlurmFacade};
