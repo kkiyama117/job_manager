@@ -69,6 +69,11 @@ impl PathResolver {
     pub fn common_toml(&self) -> PathBuf {
         self.root.join("common.toml")
     }
+
+    /// `<job_dir>/batch.bash` — the rendered batch script for submission.
+    pub fn batch_bash(&self, flow_uuid: &Uuid, jid: &JobId) -> PathBuf {
+        self.job_dir(flow_uuid, jid).join("batch.bash")
+    }
 }
 
 #[cfg(test)]
@@ -140,5 +145,14 @@ mod tests {
             r.common_toml(),
             std::path::PathBuf::from("/work/common.toml")
         );
+    }
+
+    #[test]
+    fn batch_bash_returns_job_dir_batch_bash() {
+        let r = PathResolver::new("/work");
+        let uuid = Uuid::parse_str("01997cdc-0000-7000-8000-000000000000").unwrap();
+        let jid = JobId("opt__a=0".to_string());
+        let p = r.batch_bash(&uuid, &jid);
+        assert!(p.ends_with("01997cdc-0000-7000-8000-000000000000/opt__a=0/batch.bash"));
     }
 }
