@@ -30,7 +30,6 @@ enum Cmd {
     Tick { target: String },
     /// Cross-flow search.
     Search {
-        root: PathBuf,
         #[arg(long)]
         program: Option<String>,
     },
@@ -59,10 +58,10 @@ async fn main() -> anyhow::Result<()> {
             let root = resolve_root(&cli)?;
             cmd_tick(&root, target).await
         }
-        Cmd::Search {
-            ref root,
-            ref program,
-        } => cmd_search(root, program.as_deref()).await,
+        Cmd::Search { ref program } => {
+            let root = resolve_root(&cli)?;
+            cmd_search(&root, program.as_deref()).await
+        }
     }
 }
 

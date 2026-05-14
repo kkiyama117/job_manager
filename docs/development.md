@@ -246,12 +246,12 @@ cargo build --bin jm
 ./target/debug/jm --root /work submit <flow_uuid> --dry-run
 ./target/debug/jm --root /work tick   <flow_uuid>
 ./target/debug/jm --root /work show   <flow_uuid>
-./target/debug/jm           search    /work --program g16
+./target/debug/jm --root /work search --program g16
 ```
 
-`--root <path>` or `JM_ROOT=<path>` is required for every subcommand
-except `search`, which takes `<root>` positionally. `<flow_uuid>` is a
-bare UUID string or an absolute path whose last component is the UUID.
+`--root <path>` or `JM_ROOT=<path>` is required for every subcommand.
+`<flow_uuid>` is a bare UUID string or an absolute path whose last
+component is the UUID.
 
 ## Workflow
 

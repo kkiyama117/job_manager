@@ -366,11 +366,10 @@ exposes 5 subcommands wired to `FlowRunner` via clap:
 | `submit <uuid> [--dry-run]` | render + sbatch + write `.status.toml` | `--dry-run` → `DryRun + InMemory`; else `SbatchExecutor + SlurmQuerier` |
 | `tick <uuid>` | query SLURM and apply transitions | `DryRunExecutor + SlurmQuerier` (executor unused) |
 | `show <uuid>` | read flow + per-job `.status.toml` | (none; pure reads) |
-| `search <root> [--program X]` | walk all flows, filter | (none) |
+| `search [--program X]` | walk all flows under `--root`, filter | (none) |
 
 `--root <path>` or `JM_ROOT=<path>` is required for every subcommand
-except `search` (which takes `<root>` positionally). Paths are
-canonicalized at entry.
+including `search`. Paths are canonicalized at entry.
 
 ## Testing surface
 

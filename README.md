@@ -99,10 +99,11 @@ jm --root /work tick <flow_uuid>
 jm --root /work show <flow_uuid>
 
 # 5. cross-flow search
-jm search /work --program g16
+jm --root /work search --program g16
 ```
 
-`--root` accepts an explicit path or falls back to `JM_ROOT`. Paths are
+`--root` accepts an explicit path or falls back to `JM_ROOT`, and is
+required for every subcommand including `search`. Paths are
 canonicalized (resolves `..` and symlinks). `<flow_uuid>` may be a bare
 UUID string or an absolute path whose last component is the UUID.
 
