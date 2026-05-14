@@ -2,6 +2,7 @@
 
 | Doc | Purpose |
 |---|---|
+| [API.md](./API.md) | Full Rust / Python surface (orchestration, persistence, search, helpers) + file schemas |
 | [architecture.md](./architecture.md) | Module map, on-disk layout, data flow, lifecycle model, Pyclass Single Owner rule |
 | [development.md](./development.md) | Setup, build, test, format, stub generation, common pitfalls |
 | [references/orchestration-systems.md](./references/orchestration-systems.md) | Airflow / Prefect vocabulary alignment that informs the SP-3 design |
