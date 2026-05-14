@@ -1,14 +1,29 @@
 //! Executor trait — abstraction over sbatch submission.
 
 use std::collections::VecDeque;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::path::Path;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use slurm_async_runner::{SbatchCmd, SbatchManager};
 
 use crate::error::JobManagerError;
+
+/// FNV-1a 64-bit hash of a script path, used by `DryRunExecutor` to derive
+/// a deterministic fake jobid. Inlined (no extra dependency) and stable
+/// across Rust versions — unlike `std::hash::DefaultHasher`, whose output
+/// is explicitly not guaranteed stable.
+fn deterministic_fake_jobid(script: &Path) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let bytes = script.as_os_str().as_encoded_bytes();
+    let mut h: u64 = FNV_OFFSET;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    1 + (h % 9_999_999)
+}
 
 /// Abstraction over sbatch submission.
 ///
@@ -44,9 +59,7 @@ pub struct DryRunExecutor;
 #[async_trait]
 impl Executor for DryRunExecutor {
     async fn submit(&self, cmd: SbatchCmd) -> Result<u64, JobManagerError> {
-        let mut h = DefaultHasher::new();
-        cmd.script.hash(&mut h);
-        Ok(1 + (h.finish() % 9_999_999))
+        Ok(deterministic_fake_jobid(&cmd.script))
     }
 }
 
