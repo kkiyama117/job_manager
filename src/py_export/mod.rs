@@ -39,7 +39,19 @@ mod job_manager_core {
     #[pymodule_export]
     use super::view::PyCalcView;
 
+    /// Walk all `flow.toml` under `root`. Returns a coroutine that resolves
+    /// to a list of items (each either a parsed flow object or a tuple
+    /// `(None, str)` describing an unreadable entry).
+    ///
+    /// `override_return_type` pins the awaited result type because
+    /// pyo3-stub-gen cannot yet infer `Coroutine[..., T]` from
+    /// `PyResult<Bound<'py, PyAny>>` (the shape required by
+    /// `pyo3_async_runtimes::future_into_py`).
     #[pyo3_stub_gen::derive::gen_stub_pyfunction()]
+    #[gen_stub(override_return_type(
+        type_repr = "typing.Coroutine[typing.Any, typing.Any, builtins.list[typing.Any]]",
+        imports = ("typing", "builtins")
+    ))]
     #[pyfunction]
     fn walk_flows<'py>(py: Python<'py>, root: std::path::PathBuf) -> PyResult<Bound<'py, PyAny>> {
         super::walk::walk_flows(py, root)
@@ -96,7 +108,17 @@ mod job_manager_core {
         super::render::render_batch_bash(flow_uuid, job_id, body, params)
     }
 
+    /// Submit a flow. Returns a coroutine that resolves to a
+    /// `dict[JobId, slurm_jobid]` for the jobs that were submitted.
+    /// Empty when `dry_run=True`.
+    ///
+    /// `override_return_type` pins the awaited result type — see the
+    /// note on `walk_flows` for why.
     #[pyo3_stub_gen::derive::gen_stub_pyfunction()]
+    #[gen_stub(override_return_type(
+        type_repr = "typing.Coroutine[typing.Any, typing.Any, builtins.dict[builtins.str, builtins.int]]",
+        imports = ("typing", "builtins")
+    ))]
     #[pyfunction]
     #[pyo3(signature = (root, flow_uuid, dry_run = false))]
     fn submit_flow<'py>(
