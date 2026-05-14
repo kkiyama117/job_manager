@@ -78,17 +78,23 @@ impl MockExecutor {
     }
 
     pub fn calls(&self) -> Vec<SbatchCmd> {
-        self.calls_log.lock().unwrap().clone()
+        self.calls_log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
 #[async_trait]
 impl Executor for MockExecutor {
     async fn submit(&self, cmd: SbatchCmd) -> Result<u64, JobManagerError> {
-        self.calls_log.lock().unwrap().push(cmd.clone());
+        self.calls_log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(cmd.clone());
         self.recordings
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .pop_front()
             .ok_or_else(|| JobManagerError::SubmitFailed {
                 source: anyhow::anyhow!("MockExecutor recordings exhausted"),
