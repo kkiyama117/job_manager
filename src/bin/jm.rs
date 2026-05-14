@@ -119,22 +119,26 @@ async fn cmd_submit(root: &std::path::Path, target: &str, dry_run: bool) -> anyh
     use job_manager::persistence::PathResolver;
     use job_manager::runner::flow::FlowRunner;
     use job_manager::slurm::executor::{DryRunExecutor, Executor, SbatchExecutor};
-    use job_manager::slurm::querier::InMemoryQuerier;
+    use job_manager::slurm::querier::{InMemoryQuerier, Querier, SlurmQuerier};
+    use slurm_async_runner::SlurmManager;
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     let resolver = PathResolver::new(root);
     let uuid = parse_target(root, target)?;
     let fr = FlowRun::read(&resolver, uuid)?;
-    let exec: Box<dyn Executor> = if dry_run {
-        Box::new(DryRunExecutor)
+    let (exec, querier): (Box<dyn Executor>, Box<dyn Querier>) = if dry_run {
+        (
+            Box::new(DryRunExecutor),
+            Box::new(InMemoryQuerier::new(HashMap::new())),
+        )
     } else {
-        Box::new(SbatchExecutor)
+        (
+            Box::new(SbatchExecutor),
+            Box::new(SlurmQuerier::new(Arc::new(SlurmManager::default()))),
+        )
     };
-    let runner = FlowRunner::new(
-        exec,
-        Box::new(InMemoryQuerier::new(HashMap::new())),
-        &resolver,
-    );
+    let runner = FlowRunner::new(exec, querier, &resolver);
     let jobids = runner.submit(&fr, dry_run).await?;
     println!("submitted {} jobs", jobids.len());
     for (jid, j) in jobids {

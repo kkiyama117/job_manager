@@ -1,15 +1,17 @@
 //! Python wrapper for `FlowRunner::submit` (async).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::future_into_py;
+use slurm_async_runner::SlurmManager;
 
 use crate::flow::FlowRun;
 use crate::persistence::PathResolver;
 use crate::runner::flow::FlowRunner;
 use crate::slurm::executor::{DryRunExecutor, Executor, SbatchExecutor};
-use crate::slurm::querier::InMemoryQuerier;
+use crate::slurm::querier::{InMemoryQuerier, Querier, SlurmQuerier};
 
 /// Submit a flow.
 ///
@@ -35,16 +37,20 @@ pub fn submit_flow<'py>(
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         let fr = FlowRun::read(&resolver, uuid)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        let exec: Box<dyn Executor> = if dry_run {
-            Box::new(DryRunExecutor)
+        // Pair executor and querier consistently: dry-run stays purely
+        // offline; production talks to the real sbatch + sacct via A1.
+        let (exec, querier): (Box<dyn Executor>, Box<dyn Querier>) = if dry_run {
+            (
+                Box::new(DryRunExecutor),
+                Box::new(InMemoryQuerier::new(HashMap::new())),
+            )
         } else {
-            Box::new(SbatchExecutor)
+            (
+                Box::new(SbatchExecutor),
+                Box::new(SlurmQuerier::new(Arc::new(SlurmManager::default()))),
+            )
         };
-        let runner = FlowRunner::new(
-            exec,
-            Box::new(InMemoryQuerier::new(HashMap::new())),
-            &resolver,
-        );
+        let runner = FlowRunner::new(exec, querier, &resolver);
         let result = runner
             .submit(&fr, dry_run)
             .await
