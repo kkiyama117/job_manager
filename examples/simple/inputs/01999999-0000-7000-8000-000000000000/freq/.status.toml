@@ -1,0 +1,7 @@
+lifecycle = "success"
+updated_at = "2026-05-14T16:55:44.117630180Z"
+slurm_jobid = 7543028
+
+[slurm_status]
+state = "COMPLETED"
+reason = "Dependency"
