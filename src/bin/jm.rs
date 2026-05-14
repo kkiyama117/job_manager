@@ -177,8 +177,11 @@ async fn cmd_tick(root: &std::path::Path, target: &str) -> anyhow::Result<()> {
     let manager = Arc::new(SlurmManager::default());
     let querier = SlurmQuerier::new(manager);
     let runner = FlowRunner::new(Box::new(DryRunExecutor), Box::new(querier), &resolver);
-    runner.tick(&fr).await?;
-    println!("tick complete");
+    let result = runner.tick(&fr).await?;
+    println!(
+        "tick complete: {} transitions evaluated",
+        result.transitions.len()
+    );
     Ok(())
 }
 

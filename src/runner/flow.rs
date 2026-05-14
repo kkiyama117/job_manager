@@ -18,7 +18,7 @@ use crate::job::run::JobRun;
 use crate::jobid::parse_job_id;
 use crate::persistence::{PathResolver, write_job_run};
 use crate::render::render_batch_bash;
-use crate::runner::transition::{Decision, decide_transition};
+use crate::runner::transition::{Decision, TickResult, decide_transition};
 use crate::slurm::dependency;
 use crate::slurm::executor::Executor;
 use crate::slurm::querier::Querier;
@@ -140,7 +140,12 @@ impl<'r> FlowRunner<'r> {
     /// Read all `.status.toml` files, query SLURM for non-terminal jobs,
     /// apply `decide_transition` (with parent lifecycles), and write back
     /// any updated states.
-    pub async fn tick(&self, fr: &FlowRun) -> Result<(), JobManagerError> {
+    ///
+    /// Returns a `TickResult` whose `transitions` map records every
+    /// evaluated decision (including `NoChange`) for non-terminal jobs.
+    /// Terminal jobs and jobs without a `.status.toml` file are skipped
+    /// and not recorded.
+    pub async fn tick(&self, fr: &FlowRun) -> Result<TickResult, JobManagerError> {
         let order = fr.topological_order()?;
 
         // --- collect current lifecycles ---
@@ -167,6 +172,7 @@ impl<'r> FlowRunner<'r> {
         };
 
         // --- apply transitions in topological order ---
+        let mut transitions: BTreeMap<JobId, Decision> = BTreeMap::new();
         for jid in &order {
             let run = match current.get(jid) {
                 Some(r) => r,
@@ -189,7 +195,10 @@ impl<'r> FlowRunner<'r> {
             let decision = decide_transition(run.lifecycle, slurm_status, &parent_lifecycles);
 
             let new_lifecycle = match &decision {
-                Decision::NoChange => continue,
+                Decision::NoChange => {
+                    transitions.insert(jid.clone(), decision);
+                    continue;
+                }
                 Decision::Transition { to, .. } => *to,
                 Decision::SkipDueToParent { .. } => Lifecycle::Skipped,
             };
@@ -209,12 +218,14 @@ impl<'r> FlowRunner<'r> {
             let path = self.resolver.status_file(&fr.flow_uuid, jid);
             write_job_run(&path, &updated)?;
 
+            transitions.insert(jid.clone(), decision);
+
             // Update local cache so subsequent jobs in topo order see the
             // updated lifecycle when computing their parent_lifecycles.
             current.insert(jid.clone(), updated);
         }
 
-        Ok(())
+        Ok(TickResult { transitions })
     }
 
     /// Render batch.bash for every job without submitting.
