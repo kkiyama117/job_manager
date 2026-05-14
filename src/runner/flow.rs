@@ -55,7 +55,10 @@ async fn atomic_write_batch_bash(
         .and_then(|s| s.to_str())
         .ok_or_else(|| JobManagerError::Other(format!("invalid batch path: {}", path.display())))?;
     let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let tmp = parent.join(format!(".{}.{}.tmp", file_name, std::process::id()));
+    // Use the same pid + nanos + thread-id suffix scheme as persistence/
+    // so concurrent writers in the same process can't trample each other.
+    let suffix = crate::persistence::tmp_extension();
+    let tmp = parent.join(format!(".{file_name}.{suffix}"));
 
     let write_result = tokio::fs::write(&tmp, body).await;
     if let Err(e) = write_result {

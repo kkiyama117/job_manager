@@ -28,9 +28,10 @@ pub fn write_flow(path: &Path, flow: &JobFlow) -> Result<(), JobManagerError> {
         })?;
     }
     let body = toml::to_string_pretty(flow)?;
-    // Suffix tmp file name with PID so two processes writing the same path
-    // in parallel don't trample each other's intermediate state.
-    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
+    // Suffix tmp file name with PID + nanos + thread id so neither cross-
+    // process nor intra-process concurrent writers collide on the same
+    // intermediate path.
+    let tmp = path.with_extension(super::tmp_extension());
     let result = std::fs::write(&tmp, body)
         .map_err(|source| JobManagerError::Io {
             path: tmp.clone(),
