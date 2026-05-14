@@ -67,13 +67,18 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn resolve_root(cli: &Cli) -> anyhow::Result<PathBuf> {
-    if let Some(p) = &cli.root {
-        return Ok(p.clone());
-    }
-    if let Ok(p) = std::env::var("JM_ROOT") {
-        return Ok(PathBuf::from(p));
-    }
-    anyhow::bail!("--root or JM_ROOT must be set")
+    let raw = if let Some(p) = &cli.root {
+        p.clone()
+    } else if let Ok(p) = std::env::var("JM_ROOT") {
+        PathBuf::from(p)
+    } else {
+        anyhow::bail!("--root or JM_ROOT must be set");
+    };
+    // Resolve `..` and symlinks. The root must exist on disk before any
+    // command runs anyway, so failing here gives a clearer error than
+    // letting downstream I/O hit a phantom path.
+    std::fs::canonicalize(&raw)
+        .map_err(|e| anyhow::anyhow!("failed to canonicalize root {}: {e}", raw.display()))
 }
 
 fn parse_target(_root: &std::path::Path, target: &str) -> anyhow::Result<uuid::Uuid> {
