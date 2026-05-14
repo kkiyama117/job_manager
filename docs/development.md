@@ -3,8 +3,8 @@
 Setup, build, test, and lint instructions for working on `job_manager`.
 
 For *what* the code does, see [architecture.md](./architecture.md).
-For the SP-1 design rationale, see
-`docs/superpowers/specs/2026-05-12-job-manager-sp1-design.md`.
+For the current design rationale (SP-3 v2), see
+`docs/superpowers/specs/2026-05-13-job-manager-sp3-rearch-design.md`.
 
 ## Toolchain
 
@@ -56,8 +56,9 @@ auto-imported by `python/job_manager/__init__.py`.
 
 | Command | Purpose |
 |---|---|
-| `cargo build` | Rust-only build (default features: `pyo3`, `stub_gen`) |
+| `cargo build` | Rust-only build (default features: `pyo3`, `stub_gen`). Produces both the library and the `jm` binary. |
 | `cargo build --no-default-features` | Bare core, no PyO3 — what downstream crates see |
+| `cargo build --release` | Optimized library + `jm` binary at `target/release/jm` |
 | `uv run maturin develop` | Build cdylib + install into Python env |
 | `uv run maturin build --release` | Build a release wheel |
 
@@ -87,16 +88,18 @@ cargo test --all-features && uv run pytest python/tests -v
   Co-located with the code under test.
 - `tests/integration_walk.rs` — 100 `flow.toml` files under a tempdir,
   must complete in under 1s.
-- `tests/integration_tick.rs` — 3-target `tick_many` via
-  `InMemorySlurmFacade`.
-- `python/tests/test_python_api.py` — Python-side smoke tests.
+- `tests/integration_sp3.rs` — end-to-end `FlowRunner` exercise via
+  `MockExecutor` + `InMemoryQuerier`.
+- `python/tests/test_python_api.py` — Python-side async smoke tests
+  (`submit_flow`, `walk_flows`).
+- `python/tests/test_plan.py`, `test_jobid.py`, ... — per-module
+  Python wrapper tests.
 
 ### Adding tests
 
-Follow the test-first / TDD pattern documented under
-`docs/superpowers/plans/2026-05-12-job-manager-sp1.md` (RED → GREEN →
-REFACTOR). The plan's task templates show the exact shape expected for
-new modules.
+Follow the test-first / TDD pattern documented under the per-sprint
+plans in `docs/superpowers/plans/` (RED → GREEN → REFACTOR). The plan's
+task templates show the exact shape expected for new modules.
 
 Rust unit tests live next to the code they cover:
 
@@ -116,26 +119,36 @@ mod tests {
 ```
 
 Parameterized tests use `rstest` (already a dev-dependency). See
-`src/tick.rs:266` for the canonical `#[rstest] #[case(...)]` pattern.
+`src/runner/transition.rs` for the canonical `#[rstest] #[case(...)]`
+pattern covering the lifecycle transition matrix.
 
 ### SLURM-facing tests
 
-Do **not** require a live SLURM. Use `InMemorySlurmFacade`:
+Do **not** require a live SLURM. Use `InMemoryQuerier` for the query
+side and `MockExecutor` for the submit side:
 
 ```rust
-use job_manager::{InMemorySlurmFacade, tick_many};
+use job_manager::{
+    FlowRunner, InMemoryQuerier, MockExecutor, PathResolver,
+};
 use slurm_async_runner::{JobState, JobStatus};
 use std::collections::HashMap;
 
 let mut responses = HashMap::new();
 responses.insert(99u64, JobStatus::new(JobState::Running));
-let facade = InMemorySlurmFacade::new(responses);
-let results = tick_many(&targets, &facade, &resolver).await;
+let querier = InMemoryQuerier::new(responses);
+
+let executor = MockExecutor::with_recordings(vec![99]);
+let resolver = PathResolver::new(tempdir.path());
+let runner = FlowRunner::new(Box::new(executor), Box::new(querier), &resolver);
+let result = runner.tick(&flow_run).await?;
 ```
 
-The mock is intentionally part of the public API (`pub use
-slurm_facade::InMemorySlurmFacade` in `lib.rs`) so downstream crates can use
-it too.
+Both mocks are intentionally part of the public API (`pub use
+slurm::querier::InMemoryQuerier`, `pub use slurm::executor::MockExecutor`
+in `lib.rs`) so downstream crates can use them too. `MockExecutor`
+records every submitted `SbatchCmd` and recovers from a poisoned `Mutex`
+so a panicked test still surfaces the recorded calls.
 
 ### Coverage
 
@@ -146,8 +159,9 @@ cargo llvm-cov --html          # browsable report under target/llvm-cov/html/
 cargo llvm-cov --fail-under-lines 80
 ```
 
-SP-1 ships above the 80% gate; current numbers drift with each change,
-so re-run the command above instead of trusting a checked-in figure.
+The project ships above the 80% gate; current numbers drift with each
+change, so re-run the command above instead of trusting a checked-in
+figure.
 
 ## Format & lint
 
@@ -223,6 +237,22 @@ this is wired up automatically.
   inner free function will fail. Register the stub on exactly one
   layer.
 
+## Running the `jm` CLI locally
+
+```bash
+# Build the binary (debug)
+cargo build --bin jm
+./target/debug/jm --root /work render <flow_uuid>
+./target/debug/jm --root /work submit <flow_uuid> --dry-run
+./target/debug/jm --root /work tick   <flow_uuid>
+./target/debug/jm --root /work show   <flow_uuid>
+./target/debug/jm --root /work search --program g16
+```
+
+`--root <path>` or `JM_ROOT=<path>` is required for every subcommand.
+`<flow_uuid>` is a bare UUID string or an absolute path whose last
+component is the UUID.
+
 ## Workflow
 
 For full feature work the project follows the superpowers planning loop:
@@ -234,8 +264,8 @@ For full feature work the project follows the superpowers planning loop:
 5. Final code review across the whole branch
 6. PR against the parent docs/plan branch
 
-The SP-1 design + plan are in `docs/superpowers/`. Future SP-2 / SP-3
-work follows the same shape.
+SP-1, SP-2, and SP-3 (v1 + v2) all follow this shape. The active spec
+is `2026-05-13-job-manager-sp3-rearch-design.md` (v2).
 
 ## Commit & PR
 

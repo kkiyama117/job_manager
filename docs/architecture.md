@@ -1,36 +1,49 @@
 # Architecture
 
-`job_manager` is the **data layer (SP-1)** of a 3-stage rework of
-`gaussian-experiment-manager`. It sits between two upstream crates and
-exposes the same operations to Rust and Python through a single PyO3
-extension.
+`job_manager` is a Rust orchestration library + PyO3 Python bindings +
+`jm` CLI for SLURM jobs. It sits between two upstream crates and exposes
+its capabilities to Rust, Python, and the shell through a single PyO3
+extension and a single binary.
 
-For the full design rationale and the SP-2/SP-3 scope split, see
-`docs/superpowers/specs/2026-05-12-job-manager-sp1-design.md`.
+For the current design rationale see
+`docs/superpowers/specs/2026-05-13-job-manager-sp3-rearch-design.md`
+(SP-3 v2). The Airflow / Prefect vocabulary alignment is in
+[`references/orchestration-systems.md`](./references/orchestration-systems.md).
 
 ## Position in the stack
 
 ```
-                ┌────────────────────────┐
-                │  CLI / future SP-2/3   │
-                └──────────┬─────────────┘
-                           │
-        ┌──────────────────▼──────────────────┐
-        │  job_manager   (this crate, SP-1)   │
-        │   - PathResolver / flow_io          │
-        │   - StatusEntry / status::io        │
-        │   - walk_flows / SearchFilter       │
-        │   - SlurmFacade / tick_many         │
-        │   - CalcView (per-Job facade)       │
-        └──────────┬───────────────┬──────────┘
-                   │               │
-    ┌──────────────▼──┐         ┌──▼────────────────────┐
-    │ gaussian_job_   │         │ slurm_async_runner    │
-    │ shared (D2)     │         │ (A1)                  │
-    │  JobFlow / Job  │         │  SlurmManager         │
-    │  JobId          │         │  JobStatus / JobState │
-    │                 │         │  JobReason            │
-    └─────────────────┘         └───────────────────────┘
+                ┌───────────────────────────────────────┐
+                │  jm CLI / Python / downstream callers │
+                └─────────────────┬─────────────────────┘
+                                  │
+        ┌─────────────────────────▼─────────────────────────┐
+        │                 job_manager                       │
+        │  ┌─────────────────────────────────────────────┐  │
+        │  │  FlowRun (aggregate)                        │  │
+        │  │   flow_uuid, JobFlow, ExperimentPlan,       │  │
+        │  │   Option<CommonConfig>, topological_order   │  │
+        │  └────────────────────┬────────────────────────┘  │
+        │                       │                           │
+        │  ┌────────────────────▼────────────────────────┐  │
+        │  │  FlowRunner — submit / tick / render_only   │  │
+        │  └────────┬───────────────────┬────────────────┘  │
+        │           │                   │                   │
+        │  ┌────────▼──────┐    ┌───────▼──────┐            │
+        │  │ Executor      │    │ Querier      │            │
+        │  │ (sbatch)      │    │ (sacct)      │            │
+        │  └────────┬──────┘    └───────┬──────┘            │
+        │           │ wraps A1          │ wraps A1          │
+        └───────────┼───────────────────┼───────────────────┘
+                    ▼                   ▼
+        ┌─────────────────┐    ┌────────────────────────┐
+        │ gaussian_job_   │    │ slurm_async_runner     │
+        │ shared (D2)     │    │ (A1)                   │
+        │  JobFlow / Job  │    │  SbatchManager         │
+        │  JobId / Program│    │  SlurmManager          │
+        │  CommonConfig   │    │  JobStatus / JobState  │
+        │  JobEdge        │    │  SlurmDependency       │
+        └─────────────────┘    └────────────────────────┘
 ```
 
 The two upstream crates own their pyclass definitions. `job_manager`
@@ -41,83 +54,211 @@ consumes their Rust types only (`default-features = false`) — see
 
 ```
 src/
-├── lib.rs              # public API re-exports
-├── error.rs            # JobManagerError (thiserror)
-├── path.rs             # PathResolver — pure path composition
-├── flow_io.rs          # read_flow / write_flow (atomic-rename TOML)
-├── status/
-│   ├── mod.rs          # PerJobStatus, StatusEntry
-│   └── io.rs           # read_status / write_status
-├── walk.rs             # walk_flows — async stream over <root>/*
-├── filter.rs           # SearchFilter + matches()
-├── slurm_facade.rs     # SlurmFacade trait + A1SlurmFacade + InMemorySlurmFacade
-├── tick.rs             # decide_transition (pure) + tick_many (orchestrator)
-├── view.rs             # CalcView<'a> — per-Job facade
-├── py_export/          # PyO3 surface (cfg-gated, `pyo3` feature)
-│   ├── mod.rs          #  - pymodule init via sys.modules
-│   ├── path.rs         #  - PyPathResolver  (wraps Arc<PathResolver>)
-│   ├── status.rs       #  - PyPerJobStatus
-│   ├── filter.rs       #  - PySearchFilter
-│   ├── view.rs         #  - PyCalcView
-│   ├── walk.rs         #  - walk_flows pyfunction (async)
-│   ├── tick.rs         #  - tick_many pyfunction (async)
-│   └── error.rs        #  - JobManagerError -> PyErr mapping
-└── bin/stub_gen.rs     # pyo3-stub-gen entry — generates .pyi
+├── lib.rs                  # Public re-exports
+├── error.rs                # JobManagerError (thiserror), SchemaParseError
+├── concurrency.rs          # Atomic write helpers (used by persistence + render)
+├── jobid.rs                # build_job_id / parse_job_id / validate_*  (SP-2)
+│
+├── flow/                   # Flow aggregate
+│   ├── mod.rs
+│   ├── run.rs              #   FlowRun struct (flow_uuid + JobFlow + ExperimentPlan + Option<CommonConfig>)
+│   └── topology.rs         #   Kahn's algorithm + cycle detection
+│
+├── job/                    # Per-job state
+│   ├── mod.rs
+│   ├── lifecycle.rs        #   Lifecycle enum (5 values) + is_terminal()
+│   └── run.rs              #   JobRun struct (.status.toml payload)
+│
+├── persistence/            # All file I/O
+│   ├── mod.rs              #   Re-exports + merge_with_defaults
+│   ├── path.rs             #   PathResolver (root → flow_dir → batch_bash / status_file / *.toml)
+│   ├── flow.rs             #   read_flow / write_flow (atomic, PID-suffixed tmp)
+│   ├── plan.rs             #   read_plan / write_plan (atomic, PID-suffixed tmp)
+│   ├── common.rs           #   read_common / write_common (atomic, PID-suffixed tmp)
+│   └── job_run.rs          #   read_job_run / write_job_run (atomic, PID-suffixed tmp)
+│
+├── plan/                   # ExperimentPlan struct (no I/O — moved to persistence/plan.rs)
+│   └── mod.rs
+│
+├── render/                 # batch.bash rendering
+│   └── mod.rs              #   render_batch_bash + sanitize_var_name + quote_for_bash
+│
+├── slurm/                  # All A1 contact surface
+│   ├── mod.rs
+│   ├── executor.rs         #   Executor trait + Sbatch/DryRun/Mock impls
+│   ├── querier.rs          #   Querier trait + Slurm/InMemory/Mock impls
+│   └── dependency.rs       #   JobEdge[] + submitted → SlurmDependency
+│
+├── runner/                 # Orchestration
+│   ├── mod.rs
+│   ├── flow.rs             #   FlowRunner struct — submit / tick / render_only
+│   └── transition.rs       #   decide_transition (pure) + Decision + TickResult
+│
+├── search.rs               # SearchFilter + matches()
+├── view.rs                 # CalcView<'a> — per-Job facade
+├── walk.rs                 # walk_flows — async stream over <root>/*
+│
+├── bin/
+│   ├── jm.rs               # CLI binary (clap, 5 subcommands)
+│   └── stub_gen.rs         # pyo3-stub-gen entry — generates .pyi
+│
+└── py_export/              # PyO3 surface (cfg-gated, `pyo3` feature)
+    ├── mod.rs              #  - pymodule init via sys.modules
+    ├── flow.rs             #  - PyFlowRun (frozen, __repr__)
+    ├── job.rs              #  - PyJobRun (frozen, __repr__) + PyLifecycle
+    ├── path.rs             #  - PyPathResolver
+    ├── plan.rs             #  - PyExperimentPlan
+    ├── search.rs           #  - PySearchFilter
+    ├── view.rs             #  - PyCalcView
+    ├── walk.rs             #  - walk_flows pyfunction (async)
+    ├── runner.rs           #  - submit_flow pyfunction (async)
+    ├── render.rs           #  - render_batch_bash pyfunction
+    ├── persistence.rs      #  - read_common / write_common / read_flow / write_flow
+    ├── jobid.rs            #  - build_job_id / parse_job_id / validate_*
+    ├── transition.rs       #  - (internal helpers only)
+    └── error.rs            #  - JobManagerError → PyErr mapping
 ```
 
 Each module has a single responsibility. The split between
-`status/mod.rs` (data type) and `status/io.rs` (filesystem) keeps the
-domain model free of I/O imports, mirroring the same split between
-`flow_io.rs` and `gaussian_job_shared`'s `JobFlow` type.
+`job/run.rs` (data type) and `persistence/job_run.rs` (filesystem)
+mirrors `flow/run.rs` vs `persistence/flow.rs`: the domain model is
+free of I/O imports.
 
 ## On-disk layout
 
 `PathResolver` is the single source of truth for path composition:
 
 ```
-<root>/                      <- PathResolver.root
-└── <flow_uuid>/             <- = JobFlow.work_dir
-    ├── flow.toml            <- JobFlow TOML (D2 schema)
-    └── <JobId>/             <- per-Job folder (D2 convention)
-        ├── input.gjf        <- user / grammar layer (SP-2)
-        ├── slurm-<id>.out   <- SLURM stdout
-        ├── slurm-<id>.err   <- SLURM stderr
-        └── .status.toml     <- job_manager status (this crate)
+<root>/                          <- PathResolver.root()
+├── common.toml                  <- PathResolver.common_toml()    (optional)
+└── <flow_uuid>/                 <- PathResolver.flow_dir(&uuid)
+    ├── flow.toml                <- PathResolver.flow_toml(&uuid) (D2 JobFlow)
+    ├── plan.toml                <- PathResolver.plan_toml(&uuid) (ExperimentPlan)
+    └── <JobId>/                 <- per-Job folder
+        ├── batch.bash           <- PathResolver.batch_bash(&uuid, &jid)
+        ├── input.gjf            <- user / grammar layer (out of scope)
+        ├── slurm-<id>.out       <- SLURM stdout
+        ├── slurm-<id>.err       <- SLURM stderr
+        └── .status.toml         <- PathResolver.status_file(&uuid, &jid)
 ```
+
+`common.toml` lives at the **root** level (one per root, shared across
+all flows). Per-flow common.toml is not supported.
 
 Status is **not** stored inside `JobFlow` so the D2 schema stays
 unchanged. The dot-prefix on `.status.toml` keeps it from colliding with
 SLURM outputs (`slurm-*.out`) and user files. `CalcView::files()` filters
 dot-prefixed entries.
 
+All TOML writes go through an atomic-rename helper with a
+**PID-suffixed tmp file** (`<name>.<pid>.tmp`) so two processes can
+write the same path in parallel without trampling each other's
+intermediate state. `batch.bash` additionally `chmod 0600` on Unix
+before the rename so another process cannot race-read it between write
+and `sbatch`.
+
 ## Public surface
 
 Re-exported from `lib.rs`:
 
-| Symbol | Kind | Purpose |
+| Symbol | Kind | Module |
 |---|---|---|
-| `PathResolver` | struct | path composition |
-| `read_flow` / `write_flow` | fn | JobFlow TOML I/O (atomic) |
-| `PerJobStatus` / `StatusEntry` | enum / struct | per-Job lifecycle |
-| `walk_flows` | fn → `Stream<Item=Result<JobFlow>>` | parallel filesystem walk |
-| `SearchFilter` / `matches` | struct / fn | post-walk filter |
-| `SlurmFacade` (`A1SlurmFacade`, `InMemorySlurmFacade`) | trait | SLURM query abstraction |
-| `decide_transition` / `tick_many` | fn | SLURM ↔ local reconciliation |
-| `TickResult` / `Decision` | struct | tick output |
-| `CalcView` | struct | per-Job paths + status getter |
-| `JobManagerError` / `SchemaParseError` | enum | errors |
+| `FlowRun` | struct | `flow` |
+| `JobRun` / `Lifecycle` | struct / enum | `job` |
+| `FlowRunner` / `Decision` / `TickResult` / `decide_transition` | runner | `runner` |
+| `Executor` / `SbatchExecutor` / `DryRunExecutor` / `MockExecutor` | trait + impls | `slurm::executor` |
+| `Querier` / `SlurmQuerier` / `InMemoryQuerier` | trait + impls | `slurm` |
+| `PathResolver` / `merge_with_defaults` | struct / fn | `persistence` |
+| `read_flow` / `write_flow` / `read_plan` / `write_plan` / `read_common` / `write_common` / `read_job_run` / `write_job_run` | fn | `persistence::*` |
+| `ExperimentPlan` | struct | `plan` |
+| `render_batch_bash` | fn | `render` |
+| `walk_flows` | fn → `Stream<Item=Result<JobFlow>>` | `walk` |
+| `SearchFilter` / `matches` | struct / fn | `search` |
+| `CalcView` | struct | `view` |
+| `JobIdParts` / `build_job_id` / `parse_job_id` / `validate_step_id` / `validate_job_id` | fn / struct | `jobid` |
+| `JobManagerError` / `SchemaParseError` | enum | `error` |
 
-`py_export/` mirrors the same surface in Python under
+`py_export/` mirrors most of this in Python under
 `job_manager._job_manager_core`, re-exported from
 `python/job_manager/__init__.py`.
 
 ## Data flow
 
-### Walk & filter
+### `jm submit <uuid>` (or `submit_flow(...)`)
+
+```
+CLI / Python  ──► resolve_root → PathResolver::new(&canonical_root)
+                                          │
+                                          ▼
+                  FlowRun::read(&resolver, uuid)
+                    ├─ persistence::flow::read_flow      → JobFlow
+                    ├─ persistence::plan::read_plan      → ExperimentPlan
+                    └─ persistence::common::read_common  → Option<CommonConfig>
+                                          │
+                                          ▼
+               (executor, querier) pair:
+                  dry_run = true   → DryRunExecutor + InMemoryQuerier
+                  dry_run = false  → SbatchExecutor + SlurmQuerier
+                                          │
+                                          ▼
+                  FlowRunner::new(executor, querier, &resolver)
+                                          │
+                                          ▼
+                  FlowRunner::submit(&flow_run, dry_run)
+                    │
+                    │  preseed `submitted` from any pre-existing
+                    │  .status.toml (defensive — supports re-runs
+                    │  and future skip logic)
+                    │
+                    │  for jid in topological_order():
+                    │     params  = fr.params_of(jid)
+                    │     parts   = parse_job_id(jid)
+                    │     script  = render_batch_bash(...)
+                    │     write batch.bash atomically (chmod 0600 unix)
+                    │     if dry_run: continue
+                    │     cfg     = fr.effective_config(jid)   // merge_with_defaults
+                    │     deps    = slurm::dependency::build(parents, &submitted, jid)
+                    │     cmd     = SbatchCmd::from(cfg, deps)
+                    │     jobid   = executor.submit(cmd).await
+                    │     submitted.insert(jid, jobid)
+                    │     write .status.toml { lifecycle=Queued, slurm_jobid=jobid }
+                    ▼
+                  BTreeMap<JobId, u64>
+```
+
+The synchronous TOML I/O runs inside `tokio::task::spawn_blocking` so
+the tokio runtime is never stalled.
+
+### `jm tick <uuid>`
+
+```
+FlowRunner::tick(&flow_run)
+  │  read all .status.toml under <uuid>/
+  │  collect non-terminal slurm_jobid into jobids_to_query
+  │  states = querier.query(&jobids_to_query).await
+  │
+  │  for jid in topological_order():
+  │     run = current[jid]              (skip if missing / terminal)
+  │     parents = parents_of(jid) → [(JobId, Lifecycle)]
+  │     decision = decide_transition(run.lifecycle, states.get(jid), &parents)
+  │     match decision:
+  │        NoChange       → record & continue
+  │        Transition{to,..}              → write new JobRun
+  │        SkipDueToParent{parent}        → write Lifecycle::Skipped
+  │     update local cache so later jobs see the new lifecycle
+  ▼
+TickResult { transitions: BTreeMap<JobId, Decision> }
+```
+
+`decide_transition` is pure. It uses parent lifecycles to detect
+`SkipDueToParent`, which carries the **actual culprit JobId** so the
+caller can render an accurate cause chain.
+
+### `walk_flows` + `SearchFilter` (cross-flow discovery)
 
 ```
 caller ─► walk_flows(root)               ┐
-         │   stream<JobFlow>             │ buffer_unordered(32)
+         │   stream<Result<JobFlow>>     │ buffer_unordered(N)
          │   parallel read_flow per dir  │ via spawn_blocking
          ▼                                ┘
        .filter(matches(.., &SearchFilter))
@@ -127,82 +268,59 @@ caller ─► walk_flows(root)               ┐
 ```
 
 `walk_flows` is async-stream over candidates `<root>/<uuid>/flow.toml`.
-Blocking TOML reads run on `spawn_blocking`; parallelism (default 32,
-override via `JOB_MANAGER_PARALLELISM`) is bounded by `buffer_unordered`
-so a directory with 10k flows does not exhaust file descriptors.
+Parallelism (default 32, override via `JOB_MANAGER_PARALLELISM`) is
+bounded by `buffer_unordered` so a directory with 10k flows does not
+exhaust file descriptors. Errors per entry surface as `Err` stream
+items rather than aborting the stream — one malformed `flow.toml` does
+not hide the rest.
 
-Errors per entry surface as `Err` stream items rather than aborting the
-stream — one malformed `flow.toml` does not hide the rest.
-
-### Tick (SLURM reconciliation)
-
-```
-caller ─► tick_many(targets, facade, resolver)
-   │      where targets: &[(Uuid, JobId, slurm_jobid)]
-   │
-   │   1. facade.query_states_batch(jobids)  ─►  HashMap<u64, JobStatus>
-   │   2. for each target:
-   │       prev = read_status(<status path>)
-   │       Decision = decide_transition(prev.lifecycle, slurm_status)
-   │       if changed: write_status(StatusEntry { lifecycle: new, slurm_status, .. })
-   │
-   ▼
- Vec<TickResult>
-```
-
-`decide_transition` is a pure function — its full 5-rule invariant set
-(no overwrite of `Done`, no overwrite of terminal local, etc.) is
-covered by the rstest matrix in `src/tick.rs:266`. `tick_many` only
-adds the orchestration: batch SLURM query, read/write per target,
-collect results.
-
-The raw SLURM `(state, reason)` pair (`slurm_status: JobStatus`) is
-persisted alongside the 4-state lifecycle so the UI can render
-scheduler details like `OUT_OF_MEMORY/OutOfMemory` when explaining a
-failure.
-
-### Per-Job facade
+## Lifecycle model (5 values)
 
 ```
-caller ─► CalcView::new(&flow, job_id, &resolver)?
-            │ validates job_id ∈ flow.jobs
-            ▼
-          { job(), status(), job_dir(), status_path(), files() }
-```
-
-Lifetime-tied: `CalcView<'a>` borrows the `JobFlow` and `PathResolver`,
-so the type system guarantees the flow outlives the view.
-
-## Lifecycle model
-
-`PerJobStatus` is a 4-state aggregated view, decoupled from SLURM's
-~20-state enum:
-
-```
-        ┌─────────┐    SLURM Running/Completing/Resizing/...
-        │ Queued  │ ─────────────► ┌──────────┐
-        └────┬────┘                │ Running  │ ─┐
-             │                     └────┬─────┘  │
-             │ SLURM Pending/             │       │
-             │ Configuring/...            │       │
-             ▼                            ▼       │
-         (no-op)                  ┌───────────────┴──┐
-                                  │     Failed       │ ◄── SLURM Failed/OutOfMemory/...
-                                  └──────────────────┘     except SLURM Completed
-                                          │
-                                  ┌───────▼────────┐
-                                  │      Done      │ ◄── written ONLY by post.bash,
-                                  └────────────────┘     never by tick
+(no .status.toml)                          = Pending (implicit)
+        │
+        │ FlowRunner::submit() — sbatch returned a jobid
+        ▼
+   ┌─────────┐    tick: SLURM RUNNING       ┌──────────┐
+   │ Queued  │ ───────────────────────────► │ Running  │
+   └────┬────┘                              └────┬─────┘
+        │                                        │ tick: SLURM 終了
+        │ tick: parent Failed/Skipped            ▼
+        ▼                              ┌─────────┬──────────┐
+   ┌─────────┐                         │ Success │  Failed  │
+   │ Skipped │                         └─────────┴──────────┘
+   └─────────┘  (terminal)               (terminal)
 ```
 
 Authority split:
-- **post.bash** is the sole authority for `Done`. `tick_many` never
-  promotes `Running → Done` even when SLURM reports `Completed` — it
-  emits a warning note instead, because completion is not the same as
-  successful post-processing.
-- `Failed` is terminal but `tick_many` can write it from any non-terminal
-  prev state when SLURM is `is_failed_terminal()`.
-- Terminal states (`Done`, `Failed`) are never overwritten by `tick`.
+- `decide_transition` is the sole writer of `Success` and `Failed` (it
+  promotes `Running → Success` when SLURM reports `Completed`,
+  `Running → Failed` when SLURM reports `Failed/Timeout/OOM/...`).
+- `SkipDueToParent` emits `Lifecycle::Skipped` and carries the parent
+  `JobId` for diagnostics. It triggers when any parent is in
+  `Failed | Skipped` and the dependency was `afterok`.
+- Terminal states (`Success | Failed | Skipped`) are never overwritten
+  by `tick`.
+
+The raw SLURM `(state, reason)` pair (`slurm_status: JobStatus`) is
+persisted alongside the 5-state lifecycle so a UI can render scheduler
+details like `OUT_OF_MEMORY/OutOfMemory` when explaining a failure.
+
+## `.status.toml` schema
+
+```toml
+lifecycle = "queued"          # snake_case: queued | running | success | failed | skipped
+updated_at = "2026-05-13T12:34:56Z"
+slurm_jobid = 12345
+note = "..."                  # optional
+
+[slurm_status]                # optional, A1 JobStatus shape
+state = "PENDING"
+reason = ""                   # optional A1 JobReason
+```
+
+`#[serde(deny_unknown_fields)]` is applied on `JobRun`, `ExperimentPlan`,
+and `CommonConfig` so typos surface as parse errors.
 
 ## Pyclass Single Owner rule
 
@@ -225,34 +343,62 @@ redirects D2's git-sourced SAR to the same local path so cargo treats
 
 ## Async + GIL bridging
 
-- Rust async: pure `tokio` + `futures` + `async-stream`.
+- Rust async: pure `tokio` + `futures` + `async-stream`. Sync TOML I/O
+  inside `FlowRunner::submit` / `tick` runs on `spawn_blocking`.
 - Python async: `pyo3-async-runtimes::tokio::future_into_py` wraps each
-  pyfunction. The runtime is the tokio multi-thread runtime; blocking
-  TOML I/O runs on `spawn_blocking`.
+  pyfunction. The runtime is the tokio multi-thread runtime.
 - The Python facade binds to the *running* event loop at call time, so
   callers must invoke from inside `asyncio.run(...)` or an existing
   coroutine — see `python/tests/test_python_api.py` for the pattern.
+
+`PyFlowRun` and `PyJobRun` are declared `#[pyclass(frozen)]` (read-only
+in Python; mutation only happens in Rust via `FlowRunner::submit` /
+`tick`) and both implement `__repr__`.
+
+## CLI (`jm`)
+
+The `jm` binary (`src/bin/jm.rs`) is built alongside the library and
+exposes 5 subcommands wired to `FlowRunner` via clap:
+
+| Subcommand | Action | Executor / Querier pair |
+|---|---|---|
+| `render <uuid>` | render batch.bash only | `DryRunExecutor + InMemoryQuerier` |
+| `submit <uuid> [--dry-run]` | render + sbatch + write `.status.toml` | `--dry-run` → `DryRun + InMemory`; else `SbatchExecutor + SlurmQuerier` |
+| `tick <uuid>` | query SLURM and apply transitions | `DryRunExecutor + SlurmQuerier` (executor unused) |
+| `show <uuid>` | read flow + per-job `.status.toml` | (none; pure reads) |
+| `search [--program X]` | walk all flows under `--root`, filter | (none) |
+
+`--root <path>` or `JM_ROOT=<path>` is required for every subcommand
+including `search`. Paths are canonicalized at entry.
 
 ## Testing surface
 
 ```
 src/**/*.rs                       — unit tests in #[cfg(test)] modules
+tests/integration_sp3.rs          — end-to-end FlowRunner exercise via MockExecutor
 tests/integration_walk.rs         — 100 flows enumerated under 1s
-tests/integration_tick.rs         — 3-target tick via InMemorySlurmFacade
-python/tests/test_python_api.py   — Python smoke tests
+python/tests/test_python_api.py   — Python async smoke tests
+python/tests/test_*.py            — Python wrappers (plan, jobid, ...)
 ```
 
-The `InMemorySlurmFacade` is a `pub` part of the library deliberately: it
-lets downstream crates write deterministic tests without taking a
-fixture dependency on a live SLURM cluster.
+`InMemoryQuerier` and `MockExecutor` are part of the **public** API
+(`pub use slurm::querier::InMemoryQuerier`, `pub use
+slurm::executor::MockExecutor` in `lib.rs`) deliberately, so downstream
+crates can write deterministic tests without a live SLURM cluster.
 
-## Deferred to SP-2 / SP-3
+`MockExecutor` records every submitted `SbatchCmd` (poison-recovery
+`Mutex` so a panicked test still surfaces the recorded calls). The
+test suite of 100+ tests exercises submit, tick, render, search, and
+all transition rules.
 
-Not implemented here:
+## Deferred to future work
 
-- `experiment.toml` parsing, sweep expansion, parent resolution
-- `submit_chain` equivalent (sbatch submission)
-- CLI commands (`run` / `submit` / `show` / `tick` / `kill` / ...)
-- Full `JobFlow` pyclass interop (SP-1 returns dicts via `walk_flows`)
+Not implemented here (see GitHub issue #13 for the deferred review
+followups from PR #12):
 
-These layers consume this crate's API; they do not modify it.
+- jm `search` UX (positional vs global `--root`)
+- `FlowRunner` split (`FlowSubmitter` / `FlowTicker` / `FlowRenderer`)
+- TOML read size limit (DoS hardening)
+- `JobState` enum exhaustiveness with respect to A1 evolution
+- experiment DSL / sweep expansion / parent resolution
+- TUI / interactive UI on top of `jm`

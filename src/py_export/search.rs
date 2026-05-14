@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use crate::filter::SearchFilter as Inner;
-use crate::py_export::status::PyPerJobStatus;
+use crate::py_export::job::PyLifecycle;
+use crate::search::SearchFilter as Inner;
 
 #[gen_stub_pyclass]
 #[pyclass(name = "SearchFilter", get_all, set_all, from_py_object)]
@@ -13,7 +13,7 @@ use crate::py_export::status::PyPerJobStatus;
 pub struct PySearchFilter {
     pub program: Option<String>,
     pub tags: HashMap<String, String>,
-    pub status: Option<PyPerJobStatus>,
+    pub status: Option<PyLifecycle>,
     pub flow_uuid_prefix: Option<String>,
     pub created_after: Option<DateTime<Utc>>,
     pub created_before: Option<DateTime<Utc>>,
@@ -39,7 +39,7 @@ impl PySearchFilter {
     fn new(
         program: Option<String>,
         tags: Option<HashMap<String, String>>,
-        status: Option<PyPerJobStatus>,
+        status: Option<PyLifecycle>,
         flow_uuid_prefix: Option<String>,
         created_after: Option<DateTime<Utc>>,
         created_before: Option<DateTime<Utc>>,

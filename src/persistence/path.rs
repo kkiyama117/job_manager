@@ -1,13 +1,12 @@
 //! Path resolution for the `<root>/<flow_uuid>/<JobId>/...` layout.
 //!
-//! Layout invariant (matches D2's `JobFlow.work_dir` docstring —
-//! "<work_dir>/<JobId>/ is each Job's folder"):
+//! Layout invariant:
 //!
 //! ```text
 //! <root>/                  <- PathResolver.root
-//! └── <flow_uuid>/         <- = JobFlow.work_dir (set at flow-create time)
+//! └── <flow_uuid>/         <- flow_dir(&flow.uuid)
 //!     ├── flow.toml        <- JobFlow TOML
-//!     └── <JobId>/         <- = flow.work_dir / <JobId>
+//!     └── <JobId>/         <- job_dir(&flow.uuid, &job_id)
 //!         └── .status.toml <- per-Job status (this crate, atomic write)
 //! ```
 //!
@@ -32,15 +31,26 @@ impl PathResolver {
         &self.root
     }
 
-    /// `<root>/<flow_uuid>/`. This is the path that should be stored in
-    /// `JobFlow.work_dir` so that the file-system position and the D2
-    /// field stay in lockstep.
+    /// `<root>/<flow_uuid>/`. This is the canonical on-disk folder for a
+    /// `JobFlow`; D2 no longer stores it as a field, so callers should
+    /// always derive it from the flow's `uuid` via this resolver.
     pub fn flow_dir(&self, flow_uuid: &Uuid) -> PathBuf {
         self.root.join(flow_uuid.to_string())
     }
 
     pub fn flow_toml(&self, flow_uuid: &Uuid) -> PathBuf {
         self.flow_dir(flow_uuid).join("flow.toml")
+    }
+
+    pub fn plan_toml(&self, flow_uuid: &Uuid) -> PathBuf {
+        self.flow_dir(flow_uuid).join("plan.toml")
+    }
+
+    /// 将来、ユーザーが experiment authoring の Python script を flow dir に保存
+    /// したい場合の慣用 path。SP-2 では使わない (SP-2 は experiment.toml DSL を
+    /// 実装しないため)。
+    pub fn experiment_toml(&self, flow_uuid: &Uuid) -> PathBuf {
+        self.flow_dir(flow_uuid).join("experiment.toml")
     }
 
     /// `<flow_dir>/<JobId>/` — D2's per-Job folder. SLURM stdout/stderr,
@@ -54,6 +64,15 @@ impl PathResolver {
     /// `slurm-<jobid>.out` and from grammar-layer files like `input.gjf`.
     pub fn status_file(&self, flow_uuid: &Uuid, job_id: &JobId) -> PathBuf {
         self.job_dir(flow_uuid, job_id).join(".status.toml")
+    }
+
+    pub fn common_toml(&self) -> PathBuf {
+        self.root.join("common.toml")
+    }
+
+    /// `<job_dir>/batch.bash` — the rendered batch script for submission.
+    pub fn batch_bash(&self, flow_uuid: &Uuid, jid: &JobId) -> PathBuf {
+        self.job_dir(flow_uuid, jid).join("batch.bash")
     }
 }
 
@@ -100,5 +119,40 @@ mod tests {
             r.status_file(&u, &j),
             PathBuf::from(format!("/work/{u}/g16/.status.toml"))
         );
+    }
+
+    #[test]
+    fn plan_toml_path_under_flow_dir() {
+        let r = PathResolver::new(PathBuf::from("/root"));
+        let uuid = Uuid::parse_str("0193a8c0-0000-7000-8000-000000000000").unwrap();
+        let p = r.plan_toml(&uuid);
+        assert!(p.ends_with("plan.toml"));
+        assert!(p.starts_with("/root"));
+    }
+
+    #[test]
+    fn experiment_toml_path_under_flow_dir() {
+        let r = PathResolver::new(PathBuf::from("/root"));
+        let uuid = Uuid::nil();
+        let p = r.experiment_toml(&uuid);
+        assert!(p.ends_with("experiment.toml"));
+    }
+
+    #[test]
+    fn common_toml_returns_root_common_toml() {
+        let r = PathResolver::new("/work");
+        assert_eq!(
+            r.common_toml(),
+            std::path::PathBuf::from("/work/common.toml")
+        );
+    }
+
+    #[test]
+    fn batch_bash_returns_job_dir_batch_bash() {
+        let r = PathResolver::new("/work");
+        let uuid = Uuid::parse_str("01997cdc-0000-7000-8000-000000000000").unwrap();
+        let jid = JobId("opt__a=0".to_string());
+        let p = r.batch_bash(&uuid, &jid);
+        assert!(p.ends_with("01997cdc-0000-7000-8000-000000000000/opt__a=0/batch.bash"));
     }
 }

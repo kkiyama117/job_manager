@@ -1,13 +1,12 @@
 //! Integration: 100-flow walk completes under 1s.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::time::Instant;
 
 use chrono::Utc;
 use futures::StreamExt;
 use gaussian_job_shared::entities::workflow::JobFlow;
-use job_manager::flow_io::write_flow;
+use job_manager::persistence::flow::write_flow;
 use job_manager::walk::walk_flows;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -16,7 +15,6 @@ fn empty_flow(uuid: Uuid) -> JobFlow {
     JobFlow {
         uuid,
         created_at: Utc::now(),
-        work_dir: PathBuf::from("/tmp"),
         tags: BTreeMap::new(),
         jobs: BTreeMap::new(),
     }

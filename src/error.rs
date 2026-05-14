@@ -37,8 +37,59 @@ pub enum JobManagerError {
         job: gaussian_job_shared::entities::workflow::JobId,
     },
 
+    #[error("sbatch submission failed: {source}")]
+    SubmitFailed {
+        #[source]
+        source: anyhow::Error,
+    },
+
     #[error("slurm facade error: {0}")]
     Slurm(String),
+
+    #[error("invalid step id '{0}': must match [A-Za-z0-9_-]+")]
+    InvalidStepId(String),
+
+    #[error("invalid job id '{0}': must match [A-Za-z0-9_\\-=]+")]
+    InvalidJobId(String),
+
+    #[error("reserved id '{0}' (reserved: flow, plan, experiment, derived, status)")]
+    ReservedJobId(String),
+
+    #[error("job id parse error in '{id}' at piece '{piece}': {reason}")]
+    JobIdParseError {
+        id: String,
+        piece: String,
+        reason: String,
+    },
+
+    #[error(
+        "dependency cycle detected in flow {flow}; remaining jobs (cycle members or downstream of them): {remaining:?}"
+    )]
+    DependencyCycle {
+        flow: uuid::Uuid,
+        remaining: Vec<gaussian_job_shared::entities::workflow::JobId>,
+    },
+
+    #[error("missing plan entry for job {job} in flow {flow}")]
+    MissingPlanEntry {
+        flow: uuid::Uuid,
+        job: gaussian_job_shared::entities::workflow::JobId,
+    },
+
+    #[error("bash render failed for job {job}: {reason}")]
+    RenderError {
+        job: gaussian_job_shared::entities::workflow::JobId,
+        reason: String,
+    },
+
+    #[error(
+        "toml file too large: {path} is {size} bytes, limit is {limit} bytes (set JM_MAX_TOML_SIZE to override)"
+    )]
+    FileTooLarge {
+        path: PathBuf,
+        size: u64,
+        limit: u64,
+    },
 
     #[error("{0}")]
     Other(String),
@@ -75,5 +126,18 @@ mod tests {
             source: parse.err().unwrap(),
         };
         assert!(err.to_string().contains("/tmp/bad.toml"));
+    }
+
+    #[test]
+    fn invalid_step_id_carries_input() {
+        let err = JobManagerError::InvalidStepId("opt=1".to_string());
+        assert!(err.to_string().contains("opt=1"));
+    }
+
+    #[test]
+    fn reserved_job_id_carries_name() {
+        let err = JobManagerError::ReservedJobId("flow".to_string());
+        assert!(err.to_string().contains("flow"));
+        assert!(err.to_string().contains("reserved"));
     }
 }

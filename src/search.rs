@@ -5,13 +5,14 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use gaussian_job_shared::entities::workflow::{Job, JobFlow, JobId, Program};
 
-use crate::status::{PerJobStatus, StatusEntry};
+use crate::job::lifecycle::Lifecycle;
+use crate::job::run::JobRun;
 
 #[derive(Debug, Clone, Default)]
 pub struct SearchFilter {
     pub program: Option<Program>,
     pub tags: BTreeMap<String, String>,
-    pub status: Option<PerJobStatus>,
+    pub status: Option<Lifecycle>,
     pub flow_uuid_prefix: Option<String>,
     pub created_after: Option<DateTime<Utc>>,
     pub created_before: Option<DateTime<Utc>>,
@@ -24,7 +25,7 @@ pub fn matches(
     flow: &JobFlow,
     job_id: &JobId,
     job: &Job,
-    status: Option<&StatusEntry>,
+    status: Option<&JobRun>,
     f: &SearchFilter,
 ) -> bool {
     if let Some(ref p) = f.program
@@ -83,7 +84,6 @@ mod tests {
     use rstest::rstest;
     use slurm_async_runner::entities::slurm::SlurmJobConfig;
     use std::collections::BTreeMap;
-    use std::path::PathBuf;
     use uuid::Uuid;
 
     fn cfg() -> SlurmJobConfig {
@@ -117,7 +117,6 @@ mod tests {
         let flow = JobFlow {
             uuid,
             created_at: Utc::now(),
-            work_dir: PathBuf::from("/tmp"),
             tags,
             jobs,
         };
@@ -165,12 +164,12 @@ mod tests {
     fn status_filter_requires_status_entry() {
         let (f, id, j) = make_flow(Uuid::now_v7(), BTreeMap::new());
         let filt = SearchFilter {
-            status: Some(PerJobStatus::Queued),
+            status: Some(Lifecycle::Queued),
             ..Default::default()
         };
         assert!(!matches(&f, &id, &j, None, &filt));
-        let entry = StatusEntry {
-            lifecycle: PerJobStatus::Queued,
+        let entry = JobRun {
+            lifecycle: Lifecycle::Queued,
             updated_at: Utc::now(),
             slurm_jobid: None,
             slurm_status: None,
@@ -195,8 +194,8 @@ mod tests {
     #[test]
     fn slurm_jobid_filter_matches_via_status_entry() {
         let (f, id, j) = make_flow(Uuid::now_v7(), BTreeMap::new());
-        let entry = StatusEntry {
-            lifecycle: PerJobStatus::Running,
+        let entry = JobRun {
+            lifecycle: Lifecycle::Running,
             updated_at: Utc::now(),
             slurm_jobid: Some(9999),
             slurm_status: None,

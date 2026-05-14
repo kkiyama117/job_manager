@@ -4,7 +4,7 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use crate::path::PathResolver as Inner;
+use crate::persistence::path::PathResolver as Inner;
 
 #[gen_stub_pyclass]
 #[pyclass(name = "PathResolver", frozen)]
@@ -38,9 +38,25 @@ impl PyPathResolver {
         Ok(self.inner.flow_toml(&u))
     }
 
+    fn plan_toml(&self, flow_uuid: &str) -> PyResult<PathBuf> {
+        let u = uuid::Uuid::parse_str(flow_uuid)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad uuid: {e}")))?;
+        Ok(self.inner.plan_toml(&u))
+    }
+
+    fn experiment_toml(&self, flow_uuid: &str) -> PyResult<PathBuf> {
+        let u = uuid::Uuid::parse_str(flow_uuid)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad uuid: {e}")))?;
+        Ok(self.inner.experiment_toml(&u))
+    }
+
     fn status_file(&self, flow_uuid: &str, job_id: &str) -> PyResult<PathBuf> {
         let u = uuid::Uuid::parse_str(flow_uuid)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad uuid: {e}")))?;
+        // M-2: job_id を validate_job_id でゲートする。
+        // D2 の JobId(pub String) は文字種制約を持たないため、`..` を含む
+        // job_id が path traversal の起点になりうる。Python 公開境界で弾く。
+        crate::jobid::validate_job_id(job_id).map_err(PyErr::from)?;
         Ok(self.inner.status_file(
             &u,
             &gaussian_job_shared::entities::workflow::JobId::from(job_id),

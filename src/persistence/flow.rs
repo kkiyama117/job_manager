@@ -8,36 +8,18 @@ use crate::error::JobManagerError;
 
 /// Read a `JobFlow` from a TOML file at `path`.
 pub fn read_flow(path: &Path) -> Result<JobFlow, JobManagerError> {
-    let text = std::fs::read_to_string(path).map_err(|source| JobManagerError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let text = super::read_toml_string(path)?;
     toml::from_str(&text).map_err(|source| JobManagerError::TomlParse {
         path: path.to_path_buf(),
         source,
     })
 }
 
-/// Write `flow` to `path` atomically (write to `<path>.tmp` then rename).
+/// Write `flow` to `path` atomically (tmp + fsync + rename).
 /// Creates parent directories if missing.
 pub fn write_flow(path: &Path, flow: &JobFlow) -> Result<(), JobManagerError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| JobManagerError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
     let body = toml::to_string_pretty(flow)?;
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, body).map_err(|source| JobManagerError::Io {
-        path: tmp.clone(),
-        source,
-    })?;
-    std::fs::rename(&tmp, path).map_err(|source| JobManagerError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    Ok(())
+    super::atomic_write(path, body.as_bytes())
 }
 
 #[cfg(test)]
@@ -47,7 +29,6 @@ mod tests {
     use gaussian_job_shared::entities::workflow::{Job, JobEdge, JobId, JobSpec, Program};
     use slurm_async_runner::entities::slurm::{DependencyType, SlurmJobConfig};
     use std::collections::BTreeMap;
-    use std::path::PathBuf;
     use tempfile::TempDir;
     use uuid::Uuid;
 
@@ -97,7 +78,6 @@ mod tests {
         JobFlow {
             uuid: Uuid::now_v7(),
             created_at: Utc::now(),
-            work_dir: PathBuf::from("/tmp/flow"),
             tags: BTreeMap::new(),
             jobs,
         }
@@ -134,12 +114,40 @@ mod tests {
         assert!(path.exists());
     }
 
+    fn lingering_tmp_files(parent: &std::path::Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| {
+                let p = e.ok()?.path();
+                let is_tmp = p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|n| n.ends_with(".tmp"));
+                if is_tmp { Some(p) } else { None }
+            })
+            .collect()
+    }
+
     #[test]
     fn write_leaves_no_tmp_file_on_success() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("flow.toml");
         write_flow(&path, &sample_flow()).unwrap();
-        let tmp = path.with_extension("toml.tmp");
-        assert!(!tmp.exists(), "tmp file leaked: {tmp:?}");
+        let leaks = lingering_tmp_files(dir.path());
+        assert!(leaks.is_empty(), "tmp files leaked: {leaks:?}");
+    }
+
+    #[test]
+    fn write_flow_cleans_up_tmp_on_rename_failure() {
+        // L-3: rename 失敗時に .toml.<pid>.tmp が残らないことを検証。
+        // target が既存ディレクトリだと rename(file, dir) は失敗するので、それで誘発する。
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("flow.toml");
+        std::fs::create_dir_all(&path).unwrap();
+        let flow = sample_flow();
+        let result = write_flow(&path, &flow);
+        assert!(result.is_err());
+        let leaks = lingering_tmp_files(dir.path());
+        assert!(leaks.is_empty(), "tmp files leaked: {leaks:?}");
     }
 }
