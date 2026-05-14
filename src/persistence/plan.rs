@@ -8,10 +8,7 @@ use crate::plan::ExperimentPlan;
 /// Read an `ExperimentPlan` from a TOML file at `path`.
 #[must_use = "read_plan returns the parsed ExperimentPlan; ignoring it drops the data"]
 pub fn read_plan(path: &Path) -> Result<ExperimentPlan, JobManagerError> {
-    let text = std::fs::read_to_string(path).map_err(|e| JobManagerError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
+    let text = super::read_toml_string(path)?;
     toml::from_str(&text).map_err(|e| JobManagerError::TomlParse {
         path: path.to_path_buf(),
         source: e,
@@ -21,33 +18,8 @@ pub fn read_plan(path: &Path) -> Result<ExperimentPlan, JobManagerError> {
 /// Write `plan` to `path` atomically (write to `<path>.tmp` then rename).
 /// Creates parent directories if missing (対称: `flow_io::write_flow`)。
 pub fn write_plan(path: &Path, plan: &ExperimentPlan) -> Result<(), JobManagerError> {
-    // M-4: write_flow と同じく親 dir を自動作成し、呼び側の create_dir_all 重複を解消。
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| JobManagerError::Io {
-            path: parent.to_path_buf(),
-            source: e,
-        })?;
-    }
     let text = toml::to_string_pretty(plan)?;
-    // Suffix tmp file name with PID so two processes writing the same path
-    // in parallel don't trample each other's intermediate state.
-    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
-    let result = std::fs::write(&tmp, text)
-        .map_err(|e| JobManagerError::Io {
-            path: tmp.clone(),
-            source: e,
-        })
-        .and_then(|()| {
-            std::fs::rename(&tmp, path).map_err(|e| JobManagerError::Io {
-                path: path.to_path_buf(),
-                source: e,
-            })
-        });
-    if result.is_err() {
-        // L-3: write/rename どちらの失敗でも tmp が残る可能性があるため best-effort で削除。
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    super::atomic_write(path, text.as_bytes())
 }
 
 #[cfg(test)]

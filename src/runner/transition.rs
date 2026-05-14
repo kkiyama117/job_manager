@@ -46,16 +46,51 @@ pub fn decide_transition(
         None => Decision::NoChange,
         Some(status) => {
             use slurm_async_runner::JobState;
+            // Exhaustive over every variant A1 currently exposes. If A1 adds
+            // a new state, clippy + rustc will flag this match as
+            // non-exhaustive and the maintainer must consciously bucket the
+            // new state — much safer than the previous `_ => current`
+            // wildcard which silently treated unknown states as NoChange.
             let next = match status.state {
-                JobState::Pending => Lifecycle::Queued,
-                JobState::Running => Lifecycle::Running,
+                // Queued / not progressing: still waiting for CPU.
+                JobState::Pending
+                | JobState::Configuring
+                | JobState::Requeued
+                | JobState::RequeueFed
+                | JobState::RequeueHold
+                | JobState::ResvDelHold
+                | JobState::Suspended
+                | JobState::Stopped => Lifecycle::Queued,
+
+                // Alive / progressing: job is on the node, even if SLURM
+                // is currently cleaning up or signaling.
+                JobState::Running
+                | JobState::Completing
+                | JobState::Resizing
+                | JobState::Signaling
+                | JobState::StageOut => Lifecycle::Running,
+
+                // Terminal success: only `Completed` means exit 0.
                 JobState::Completed => Lifecycle::Success,
-                JobState::Failed
-                | JobState::Timeout
-                | JobState::OutOfMemory
+
+                // Terminal failure: every flavor SLURM offers, including
+                // BootFail/Preempted/Revoked/SpecialExit/Deadline that the
+                // old wildcard silently dropped.
+                JobState::BootFail
+                | JobState::Cancelled
+                | JobState::Deadline
+                | JobState::Failed
                 | JobState::NodeFail
-                | JobState::Cancelled => Lifecycle::Failed,
-                _ => current,
+                | JobState::OutOfMemory
+                | JobState::Preempted
+                | JobState::Revoked
+                | JobState::SpecialExit
+                | JobState::Timeout => Lifecycle::Failed,
+
+                // Sentinel: keep current — parse failure should not flip
+                // a job's lifecycle on its own. Caller can inspect
+                // `slurm_status` to surface the raw string.
+                JobState::Unknown => current,
             };
             if next == current {
                 Decision::NoChange
@@ -122,6 +157,44 @@ mod tests {
     #[test]
     fn terminal_returns_no_change() {
         let decision = decide_transition(Lifecycle::Success, None, &[]);
+        assert!(matches!(decision, Decision::NoChange));
+    }
+
+    #[test]
+    fn boot_fail_transitions_to_failed() {
+        // Previously the wildcard arm dropped BootFail to NoChange. With
+        // the exhaustive match, every terminal-failure variant maps to
+        // Lifecycle::Failed.
+        use slurm_async_runner::{JobState, JobStatus};
+        let status = JobStatus::new(JobState::BootFail);
+        let decision = decide_transition(Lifecycle::Queued, Some(&status), &[]);
+        match decision {
+            Decision::Transition { to, .. } => assert_eq!(to, Lifecycle::Failed),
+            other => panic!("expected Transition to Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn completing_transitions_queued_to_running() {
+        // Same fix: SLURM's transient `Completing` (process exit cleanup)
+        // means the job did run, so we should reflect Running rather than
+        // silently keeping it Queued.
+        use slurm_async_runner::{JobState, JobStatus};
+        let status = JobStatus::new(JobState::Completing);
+        let decision = decide_transition(Lifecycle::Queued, Some(&status), &[]);
+        match decision {
+            Decision::Transition { to, .. } => assert_eq!(to, Lifecycle::Running),
+            other => panic!("expected Transition to Running, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_keeps_current_lifecycle() {
+        // `Unknown` is the sentinel for parse failure; we must not flip a
+        // job's lifecycle based on a state we couldn't decode.
+        use slurm_async_runner::{JobState, JobStatus};
+        let status = JobStatus::new(JobState::Unknown);
+        let decision = decide_transition(Lifecycle::Running, Some(&status), &[]);
         assert!(matches!(decision, Decision::NoChange));
     }
 }

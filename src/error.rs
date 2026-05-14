@@ -62,8 +62,13 @@ pub enum JobManagerError {
         reason: String,
     },
 
-    #[error("dependency cycle detected in flow {flow}")]
-    DependencyCycle { flow: uuid::Uuid },
+    #[error(
+        "dependency cycle detected in flow {flow}; remaining jobs (cycle members or downstream of them): {remaining:?}"
+    )]
+    DependencyCycle {
+        flow: uuid::Uuid,
+        remaining: Vec<gaussian_job_shared::entities::workflow::JobId>,
+    },
 
     #[error("missing plan entry for job {job} in flow {flow}")]
     MissingPlanEntry {
@@ -75,6 +80,15 @@ pub enum JobManagerError {
     RenderError {
         job: gaussian_job_shared::entities::workflow::JobId,
         reason: String,
+    },
+
+    #[error(
+        "toml file too large: {path} is {size} bytes, limit is {limit} bytes (set JM_MAX_TOML_SIZE to override)"
+    )]
+    FileTooLarge {
+        path: PathBuf,
+        size: u64,
+        limit: u64,
     },
 
     #[error("{0}")]

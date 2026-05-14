@@ -7,10 +7,7 @@ use crate::job::run::JobRun;
 
 #[must_use = "read_job_run returns the parsed JobRun; ignoring it drops the data"]
 pub fn read_job_run(path: &Path) -> Result<JobRun, JobManagerError> {
-    let text = std::fs::read_to_string(path).map_err(|source| JobManagerError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let text = super::read_toml_string(path)?;
     toml::from_str(&text).map_err(|source| JobManagerError::TomlParse {
         path: path.to_path_buf(),
         source,
@@ -18,31 +15,8 @@ pub fn read_job_run(path: &Path) -> Result<JobRun, JobManagerError> {
 }
 
 pub fn write_job_run(path: &Path, run: &JobRun) -> Result<(), JobManagerError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| JobManagerError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
     let text = toml::to_string(run)?;
-    // Suffix tmp file name with PID so two processes writing the same path
-    // in parallel don't trample each other's intermediate state.
-    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
-    let result = std::fs::write(&tmp, text)
-        .map_err(|source| JobManagerError::Io {
-            path: tmp.clone(),
-            source,
-        })
-        .and_then(|()| {
-            std::fs::rename(&tmp, path).map_err(|source| JobManagerError::Io {
-                path: path.to_path_buf(),
-                source,
-            })
-        });
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    super::atomic_write(path, text.as_bytes())
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@ fn jm_help_runs() {
 }
 
 #[test]
-fn jm_run_renders_batch_bash() {
+fn jm_render_writes_batch_bash() {
     use gaussian_job_shared::entities::workflow::{Job, JobFlow, JobId, JobSpec, Program};
     use job_manager::persistence::{PathResolver, write_flow, write_plan};
     use job_manager::plan::ExperimentPlan;
@@ -63,7 +63,7 @@ fn jm_run_renders_batch_bash() {
     let mut cmd = Command::cargo_bin("jm").unwrap();
     cmd.arg("--root")
         .arg(dir.path())
-        .arg("run")
+        .arg("render")
         .arg(uuid.to_string());
     cmd.assert()
         .success()

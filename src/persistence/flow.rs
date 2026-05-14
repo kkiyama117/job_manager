@@ -8,45 +8,18 @@ use crate::error::JobManagerError;
 
 /// Read a `JobFlow` from a TOML file at `path`.
 pub fn read_flow(path: &Path) -> Result<JobFlow, JobManagerError> {
-    let text = std::fs::read_to_string(path).map_err(|source| JobManagerError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let text = super::read_toml_string(path)?;
     toml::from_str(&text).map_err(|source| JobManagerError::TomlParse {
         path: path.to_path_buf(),
         source,
     })
 }
 
-/// Write `flow` to `path` atomically (write to `<path>.tmp` then rename).
+/// Write `flow` to `path` atomically (tmp + fsync + rename).
 /// Creates parent directories if missing.
 pub fn write_flow(path: &Path, flow: &JobFlow) -> Result<(), JobManagerError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| JobManagerError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
     let body = toml::to_string_pretty(flow)?;
-    // Suffix tmp file name with PID so two processes writing the same path
-    // in parallel don't trample each other's intermediate state.
-    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
-    let result = std::fs::write(&tmp, body)
-        .map_err(|source| JobManagerError::Io {
-            path: tmp.clone(),
-            source,
-        })
-        .and_then(|()| {
-            std::fs::rename(&tmp, path).map_err(|source| JobManagerError::Io {
-                path: path.to_path_buf(),
-                source,
-            })
-        });
-    if result.is_err() {
-        // L-3: write/rename どちらの失敗でも tmp が残る可能性があるため best-effort で削除。
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    super::atomic_write(path, body.as_bytes())
 }
 
 #[cfg(test)]
