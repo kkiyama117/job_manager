@@ -75,6 +75,28 @@ impl<'r> FlowRunner<'r> {
         let order = fr.topological_order()?;
         let mut submitted: BTreeMap<JobId, u64> = BTreeMap::new();
 
+        // Defensive preseed: if a parent's status.toml already exists from
+        // a previous run, populate `submitted` with its recorded slurm_jobid
+        // so `dependency::build` still resolves the dependency even when the
+        // parent is missing from the current topo order (e.g., removed from
+        // flow.toml between runs) or when a future revision adds skip logic.
+        let mut candidate_jids: std::collections::BTreeSet<JobId> =
+            fr.flow.jobs.keys().cloned().collect();
+        for job in fr.flow.jobs.values() {
+            for edge in &job.parents {
+                candidate_jids.insert(edge.from.clone());
+            }
+        }
+        for jid in &candidate_jids {
+            let path = self.resolver.status_file(&fr.flow_uuid, jid);
+            if tokio::fs::try_exists(&path).await.unwrap_or(false)
+                && let Ok(run) = async_read_job_run(path).await
+                && let Some(jobid) = run.slurm_jobid
+            {
+                submitted.insert(jid.clone(), jobid);
+            }
+        }
+
         for jid in &order {
             // --- render batch.bash ---
             let params = fr.params_of(jid)?;
