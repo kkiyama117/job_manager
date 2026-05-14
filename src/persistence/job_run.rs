@@ -7,10 +7,7 @@ use crate::job::run::JobRun;
 
 #[must_use = "read_job_run returns the parsed JobRun; ignoring it drops the data"]
 pub fn read_job_run(path: &Path) -> Result<JobRun, JobManagerError> {
-    let text = std::fs::read_to_string(path).map_err(|source| JobManagerError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let text = super::read_toml_string(path)?;
     toml::from_str(&text).map_err(|source| JobManagerError::TomlParse {
         path: path.to_path_buf(),
         source,

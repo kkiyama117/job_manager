@@ -82,6 +82,15 @@ pub enum JobManagerError {
         reason: String,
     },
 
+    #[error(
+        "toml file too large: {path} is {size} bytes, limit is {limit} bytes (set JM_MAX_TOML_SIZE to override)"
+    )]
+    FileTooLarge {
+        path: PathBuf,
+        size: u64,
+        limit: u64,
+    },
+
     #[error("{0}")]
     Other(String),
 }

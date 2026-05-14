@@ -8,10 +8,7 @@ use crate::error::JobManagerError;
 
 /// Read a `JobFlow` from a TOML file at `path`.
 pub fn read_flow(path: &Path) -> Result<JobFlow, JobManagerError> {
-    let text = std::fs::read_to_string(path).map_err(|source| JobManagerError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let text = super::read_toml_string(path)?;
     toml::from_str(&text).map_err(|source| JobManagerError::TomlParse {
         path: path.to_path_buf(),
         source,
