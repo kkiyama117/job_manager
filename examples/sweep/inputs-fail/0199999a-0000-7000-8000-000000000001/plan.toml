@@ -1,0 +1,43 @@
+# ExperimentPlan — per-JobId render params, surfaced into batch.bash as
+# `JM_PARAM_<UPPER_NAME>` env exports by `render_batch_bash`.
+#
+# Schema: job_manager::plan::ExperimentPlan (deny_unknown_fields)
+#   jobs.<JobId> : BTreeMap<String, toml::Value>
+#
+# Every JobId in flow.toml has a corresponding entry here. `prep` carries
+# only a `route = "bootstrap"` marker plus an empty `compound_name` to
+# keep the export defined.
+#
+# `route` here is demo text (the body is plain `echo`, not g16). The
+# point is that `plan.toml` is the single place to vary params across a
+# sweep without editing `flow.toml`.
+
+[jobs.prep]
+compound_name = ""
+route         = "bootstrap"
+
+# --- opt branches: 3-way sweep on compound ---
+[jobs."opt__compound=0"]
+compound_name = "benzene"
+route         = "B3LYP/6-31G* opt"
+
+[jobs."opt__compound=1"]
+compound_name = "toluene"
+route         = "B3LYP/6-31G* opt"
+
+[jobs."opt__compound=2"]
+compound_name = "p-xylene"
+route         = "B3LYP/6-31G* opt"
+
+# --- freq branches: same sweep, downstream step ---
+[jobs."freq__compound=0"]
+compound_name = "benzene"
+route         = "B3LYP/6-31G* freq"
+
+[jobs."freq__compound=1"]
+compound_name = "toluene"
+route         = "B3LYP/6-31G* freq"
+
+[jobs."freq__compound=2"]
+compound_name = "p-xylene"
+route         = "B3LYP/6-31G* freq"
