@@ -40,6 +40,56 @@ async fn async_read_job_run(path: PathBuf) -> Result<JobRun, JobManagerError> {
         .map_err(|e| JobManagerError::Other(format!("read_job_run blocking task: {e}")))?
 }
 
+/// Write `batch.bash` atomically: write to a PID-suffixed tmp file in the
+/// same directory, restrict permissions to owner-only on Unix, then rename
+/// over `path`. Prevents a window in which another process can race-read
+/// or modify the script between the initial write and `sbatch` picking it
+/// up. The PID suffix also avoids tmp-name collisions if two parallel
+/// `submit` calls happen to target the same job dir.
+async fn atomic_write_batch_bash(
+    path: &std::path::Path,
+    body: &[u8],
+) -> Result<(), JobManagerError> {
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| JobManagerError::Other(format!("invalid batch path: {}", path.display())))?;
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let tmp = parent.join(format!(".{}.{}.tmp", file_name, std::process::id()));
+
+    let write_result = tokio::fs::write(&tmp, body).await;
+    if let Err(e) = write_result {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(JobManagerError::Io {
+            path: tmp.clone(),
+            source: e,
+        });
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) =
+            tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await
+        {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(JobManagerError::Io {
+                path: tmp.clone(),
+                source: e,
+            });
+        }
+    }
+
+    if let Err(e) = tokio::fs::rename(&tmp, path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(JobManagerError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        });
+    }
+    Ok(())
+}
+
 /// FlowRunner — owns a boxed `Executor` and `Querier`, and coordinates the
 /// submit / tick / render_only operations for a given `FlowRun`.
 pub struct FlowRunner<'r> {
@@ -124,12 +174,7 @@ impl<'r> FlowRunner<'r> {
                         source: e,
                     })?;
             }
-            tokio::fs::write(&batch_path, &script_content)
-                .await
-                .map_err(|e| JobManagerError::Io {
-                    path: batch_path.clone(),
-                    source: e,
-                })?;
+            atomic_write_batch_bash(&batch_path, script_content.as_bytes()).await?;
 
             if dry_run {
                 continue;
