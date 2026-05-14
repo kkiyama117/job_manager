@@ -54,8 +54,12 @@ snapshot.
 No SLURM needed. From the repo root:
 
 ```bash
-# 1. Build the CLI (one-time)
-cargo build --bin jm
+# 1. Build the CLI without pyo3 (one-time)
+#    The default feature set links `jm` against libpython3.13 for the
+#    sibling `stub_gen` binary. `jm` itself doesn't call Python, so
+#    `--no-default-features` produces a self-contained binary that runs
+#    on hosts (login / compute nodes) without libpython installed.
+cargo build --bin jm --no-default-features
 
 # 2. Run a dry-run against the committed inputs/
 ./target/debug/jm \
@@ -99,6 +103,13 @@ log_stderr = "/path/to/logs/%x.%j.err"
 ### Step-by-step
 
 ```bash
+# 0. Build the CLI without pyo3 so it doesn't need libpython3.13 at
+#    runtime — login nodes and most compute nodes don't ship a CPython
+#    shared library. If you forget `--no-default-features`, you'll see:
+#       error while loading shared libraries: libpython3.13.so.1.0: cannot open shared object file
+cargo build --release --bin jm --no-default-features
+JM=./target/release/jm
+
 # Pick a working root — anywhere your cluster can sbatch from
 ROOT=/path/to/your/scratch/jm-simple-demo
 UUID=01999999-0000-7000-8000-000000000000
@@ -110,18 +121,18 @@ cp examples/simple/inputs/$UUID/flow.toml      "$ROOT/$UUID/flow.toml"
 cp examples/simple/inputs/$UUID/plan.toml      "$ROOT/$UUID/plan.toml"
 
 # 2. (Optional) Render only — sanity-check the generated batch.bash
-./target/debug/jm --root "$ROOT" render "$UUID"
+"$JM" --root "$ROOT" render "$UUID"
 cat "$ROOT/$UUID/opt/batch.bash"
 
 # 3. Submit for real — calls sbatch, writes .status.toml (lifecycle=Queued)
-./target/debug/jm --root "$ROOT" submit "$UUID"
+"$JM" --root "$ROOT" submit "$UUID"
 # → prints { "freq": <slurm_jobid>, "opt": <slurm_jobid> }
 
 # 4. Tick — query SLURM and transition lifecycles. Run in a loop or via cron.
-./target/debug/jm --root "$ROOT" tick "$UUID"
+"$JM" --root "$ROOT" tick "$UUID"
 
 # 5. Inspect
-./target/debug/jm --root "$ROOT" show "$UUID"
+"$JM" --root "$ROOT" show "$UUID"
 ```
 
 `tick` is idempotent and only mutates non-terminal `.status.toml`

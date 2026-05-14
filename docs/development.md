@@ -256,8 +256,10 @@ this is wired up automatically.
 ## Running the `jm` CLI locally
 
 ```bash
-# Build the binary (debug)
-cargo build --bin jm
+# Build the binary (debug). `--no-default-features` strips the pyo3
+# stack so `jm` is not dynamically linked against libpython3.13 — see
+# the deployment note below.
+cargo build --bin jm --no-default-features
 ./target/debug/jm --root /work render <flow_uuid>
 ./target/debug/jm --root /work submit <flow_uuid> --dry-run
 ./target/debug/jm --root /work tick   <flow_uuid>
@@ -268,6 +270,30 @@ cargo build --bin jm
 `--root <path>` or `JM_ROOT=<path>` is required for every subcommand.
 `<flow_uuid>` is a bare UUID string or an absolute path whose last
 component is the UUID.
+
+### Deploying `jm` on a SLURM node without libpython
+
+The default Cargo features (`pyo3 + stub_gen`) are needed for the
+`stub_gen` binary and the Python extension build, but they also wire
+`libpython3.13.so.1.0` into the `jm` binary's dynamic-link table. On
+login / compute nodes that don't ship CPython, the result is:
+
+```
+./jm: error while loading shared libraries: libpython3.13.so.1.0:
+cannot open shared object file: No such file or directory
+```
+
+Two options:
+
+1. Build with `--no-default-features` and ship the resulting binary —
+   `jm` itself never calls into Python, so this is the right answer
+   for production:
+   ```bash
+   cargo build --release --bin jm --no-default-features
+   scp target/release/jm <login-node>:~/bin/
+   ```
+2. (Discouraged) install CPython 3.13 on the target node so the
+   abi3-linked `jm` can find `libpython3.13.so.1.0` at runtime.
 
 ## Workflow
 
