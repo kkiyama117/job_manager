@@ -6,8 +6,10 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use crate::flow::FlowRun;
 use crate::persistence::PathResolver;
 
+/// Python-facing wrapper for `FlowRun`. Read-only — mutation happens in
+/// Rust via `FlowRunner`. `frozen` enforces that on the Python side.
 #[gen_stub_pyclass]
-#[pyclass(name = "FlowRun", module = "job_manager._job_manager_core")]
+#[pyclass(name = "FlowRun", module = "job_manager._job_manager_core", frozen)]
 pub struct PyFlowRun {
     pub(crate) inner: FlowRun,
 }
@@ -30,5 +32,13 @@ impl PyFlowRun {
     #[getter]
     pub fn flow_uuid(&self) -> String {
         self.inner.flow_uuid.to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "FlowRun(flow_uuid={}, job_count={})",
+            self.inner.flow_uuid,
+            self.inner.flow.jobs.len(),
+        )
     }
 }

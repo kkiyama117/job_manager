@@ -45,10 +45,12 @@ impl From<Inner> for PyLifecycle {
 /// Python-facing wrapper for `JobRun` (旧 `StatusEntry`).
 ///
 /// Read-only view. Mutation is performed in Rust via `FlowRunner::submit`/`tick`.
+/// `frozen` makes that read-only intent enforceable by PyO3.
 #[gen_stub_pyclass]
 #[pyclass(
     name = "JobRun",
     module = "job_manager._job_manager_core",
+    frozen,
     from_py_object
 )]
 #[derive(Clone)]
@@ -72,6 +74,13 @@ impl PyJobRun {
     #[getter]
     fn note(&self) -> Option<String> {
         self.inner.note.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "JobRun(lifecycle={:?}, slurm_jobid={:?})",
+            self.inner.lifecycle, self.inner.slurm_jobid,
+        )
     }
 }
 
