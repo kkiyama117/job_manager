@@ -1,0 +1,17 @@
+# Optional root-level common.toml — SLURM resource defaults merged into
+# each job's SlurmJobConfig at submit time via `merge_with_defaults`.
+#
+# Schema: gaussian_job_shared::config::CommonConfig (deny_unknown_fields)
+#   [slurm_default]  → slurm_async_runner::entities::slurm::SlurmJobConfig
+#   [directories]    → DirectoryConfig { project_root: PathBuf }
+#
+# These values are placeholders — swap `partition`, `mail_user`, log paths,
+# and `project_root` for your cluster before running.
+
+[slurm_default]
+partition  = "debug"
+time_limit = "00:10:00"
+job_name   = "jm-simple"
+
+[directories]
+project_root = "/tmp/job-manager-example/work"

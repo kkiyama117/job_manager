@@ -1,0 +1,40 @@
+# Minimal JobFlow — two-step DAG: `opt` → `freq` (afterok).
+#
+# Schema: gaussian_job_shared::entities::workflow::JobFlow (deny_unknown_fields)
+#   uuid          UUID v7 — must match the parent directory name
+#   created_at    RFC3339 UTC
+#   tags          (optional) BTreeMap<String, String>
+#   jobs.<JobId>  Job = JobSpec (flattened: program, body, config) + parents
+#
+# `parents[]` is an array of JobEdge { from, kind }. `kind` is the
+# SLURM-canonical lowercase keyword (afterok / afterany / after / ...).
+#
+# `body` is plain bash; `render_batch_bash` prepends the JM_* env-export
+# preamble and `merge_with_defaults` merges this `config` with
+# `common.toml`'s `[slurm_default]`.
+
+uuid       = "01999999-0000-7000-8000-000000000000"
+created_at = "2026-05-15T00:00:00Z"
+
+[tags]
+example = "simple"
+
+# --- root step ---
+[jobs.opt]
+program = "echo"
+body    = "echo \"[opt] flow=$JM_FLOW_UUID job=$JM_JOB_ID\"\nsleep 2\n"
+
+[jobs.opt.config]
+partition = "debug"
+
+# --- child step: depends on `opt` finishing with exit 0 ---
+[jobs.freq]
+program = "echo"
+body    = "echo \"[freq] flow=$JM_FLOW_UUID job=$JM_JOB_ID\"\nsleep 2\n"
+
+[[jobs.freq.parents]]
+from = "opt"
+kind = "afterok"
+
+[jobs.freq.config]
+partition = "debug"
