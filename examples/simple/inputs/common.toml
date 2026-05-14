@@ -13,9 +13,14 @@
 # looks real (e.g. "debug") and may or may not exist on your cluster.
 
 [slurm_default]
-partition  = "gr10641a"          # ← set to a real partition on your cluster (sinfo -s)
+partition  = "REPLACE_ME"          # ← set to a real partition on your cluster (sinfo -s)
 time_limit = "00:10:00"
 job_name   = "jm-simple"
+# Uncomment + adapt to keep SLURM stdout/stderr next to the job's
+# batch.bash instead of dropping them in whatever directory you ran
+# `jm submit` from. `%j` is the SLURM job id; `%x` is `job_name`.
+# log_stdout = "<absolute_project_root>/%x.%j.out"
+# log_stderr = "<absolute_project_root>/%x.%j.err"
 
 [directories]
-project_root = "$HOME/.cache/job_manager_test/simple/inputs"        # ← absolute, writable path on the cluster filesystem
+project_root = "REPLACE_ME"        # ← absolute, writable path on the cluster filesystem; tilde / $HOME are NOT expanded by the TOML loader

@@ -1,5 +1,14 @@
 /target
 
+# SLURM stdout/stderr captures land wherever `cargo run` / `jm` is
+# invoked from when `log_stdout` / `log_stderr` are unset in
+# common.toml. Keep them out of the repo by default; real example
+# captures live under examples/*/outputs/ and are committed explicitly.
+slurm-*.out
+slurm-*.err
+!examples/**/slurm-*.out
+!examples/**/slurm-*.err
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 .pytest_cache/
