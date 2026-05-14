@@ -333,13 +333,18 @@ type — same `__module__` string, distinct Python type object — and
 We enforce single ownership in `Cargo.toml`:
 
 ```toml
-gaussian_job_shared = { path = "../gaussian-job-shared2", default-features = false }
-slurm_async_runner  = { path = "../slurm-async-runner2",  default-features = false }
+gaussian_job_shared = { git = "https://github.com/kkiyama117/gaussian_job_shared.git", default-features = false }
+slurm_async_runner  = { git = "https://github.com/kkiyama117/slurm-async-runner.git",  default-features = false }
 ```
 
-Plus `[patch."https://github.com/kkiyama117/slurm-async-runner.git"]`
-redirects D2's git-sourced SAR to the same local path so cargo treats
-`JobStatus`/`DependencyType` as one type.
+Both refs omit `rev`; the exact commit lives in `Cargo.lock`. D2's own
+`Cargo.toml` references `slurm-async-runner` via the same git URL (also
+unpinned), so the resolver unifies the direct and transitive references
+onto a single source entry — there is no separate `[patch.*]` block.
+If a future change pins a specific `rev` here for `slurm_async_runner`,
+add a patch redirecting D2's transitive reference to match, otherwise
+the resolver splits `JobStatus` / `DependencyType` into two compiled
+types.
 
 ## Async + GIL bridging
 

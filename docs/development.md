@@ -20,22 +20,37 @@ No global toolchain selection needed.
 
 ## Repository layout
 
-Upstream crates live as **siblings** of this repo on disk:
-
 ```
-GAUSSIAN_repo_packages/
-├── gaussian-job-shared2/   # D2 — JobFlow, Job, JobId
-├── slurm-async-runner2/    # A1 — SlurmManager, JobStatus
-└── job-manager/            # this repo
-    ├── Cargo.toml          # has path = "../gaussian-job-shared2" etc.
-    ├── src/                # Rust crate
-    ├── python/             # Python facade + tests + .pyi
-    ├── tests/              # Rust integration tests
-    └── docs/               # this directory
+job-manager/
+├── Cargo.toml          # D2/A1 pulled from GitHub via `git = "..."`
+├── src/                # Rust crate
+├── python/             # Python facade + tests + .pyi
+├── tests/              # Rust integration tests
+└── docs/               # this directory
 ```
 
-If the sibling layout is missing, `cargo build` fails on the path
-dependency resolution. Clone all three before building.
+Upstream crates are fetched directly from GitHub at build time:
+
+- D2 (`gaussian_job_shared`) — `https://github.com/kkiyama117/gaussian_job_shared.git`
+- A1 (`slurm_async_runner`)  — `https://github.com/kkiyama117/slurm-async-runner.git`
+
+Both consumed with `default-features = false` to respect the
+[Pyclass Single Owner rule](./architecture.md#pyclass-single-owner-rule).
+No sibling-repo checkout is required.
+
+To work against a local checkout of D2 or A1 during development, override
+the resolver in your global Cargo config (`~/.cargo/config.toml`) rather
+than editing this repo's `Cargo.toml`:
+
+```toml
+[patch."https://github.com/kkiyama117/gaussian_job_shared.git"]
+gaussian_job_shared = { path = "/path/to/your/gaussian-job-shared2" }
+
+[patch."https://github.com/kkiyama117/slurm-async-runner.git"]
+slurm_async_runner  = { path = "/path/to/your/slurm-async-runner2" }
+```
+
+Keep the override out of git — it's a per-machine concern.
 
 ## First-time setup
 
@@ -215,10 +230,11 @@ this is wired up automatically.
 
 ## Common pitfalls
 
-- **Type mismatch between `JobStatus` from D2 vs A1.** Resolved by the
-  `[patch."https://github.com/kkiyama117/slurm-async-runner.git"]`
-  block in `Cargo.toml`. If you ever see `expected JobStatus, found
-  JobStatus` from cargo, that block has been removed or paths drifted —
+- **Type mismatch between `JobStatus` from D2 vs A1.** D2 references
+  `slurm-async-runner` with the same git URL (no `rev`) that this crate
+  uses, so the resolver unifies them onto a single source entry. If you
+  ever see `expected JobStatus, found JobStatus` from cargo, someone
+  has pinned a specific `rev` on one side without patching the other —
   see [architecture.md](./architecture.md#pyclass-single-owner-rule).
 - **`asyncio.run(walk_flows(...))` fails with "no running event loop".**
   `pyo3-async-runtimes` binds the future to the loop at *call time*,
@@ -229,8 +245,8 @@ this is wired up automatically.
   asyncio.run(run(root))
   ```
 - **`isinstance` returns `False` across crate boundaries.** A new
-  pyclass was probably added to a sibling cdylib without disabling its
-  `pyo3` feature here. See the **Pyclass Single Owner rule** in
+  pyclass was probably added to an upstream cdylib without disabling
+  its `pyo3` feature here. See the **Pyclass Single Owner rule** in
   [architecture.md](./architecture.md#pyclass-single-owner-rule).
 - **`stub_gen` segfaults or fails to link.** A duplicate
   `#[gen_stub_pyfunction]` on both the outer pymodule export *and* the

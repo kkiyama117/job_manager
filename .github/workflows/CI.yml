@@ -3,12 +3,9 @@
 #
 #    maturin generate-ci github
 #
-# Sibling-crate checkout pattern: job_manager's Cargo.toml uses
-# `path = "../slurm-async-runner2"` and `path = "../gaussian-job-shared2"`
-# (Pyclass Single Owner rule — see docs/architecture.md). CI must lay out
-# the workspace so those relative paths resolve, by checking each repo
-# into its sibling directory under `${{ github.workspace }}` and running
-# maturin with `working-directory: job_manager`.
+# Upstream crates (gaussian_job_shared, slurm_async_runner) are pulled
+# directly from GitHub via `git = "..."` in Cargo.toml, so this workflow
+# only needs to check out this repository.
 name: CI
 
 on:
@@ -42,23 +39,12 @@ jobs:
             target: ppc64le
     steps:
       - uses: actions/checkout@v6
-        with:
-          path: job_manager
-      - uses: actions/checkout@v6
-        with:
-          repository: kkiyama117/slurm-async-runner
-          path: slurm-async-runner2
-      - uses: actions/checkout@v6
-        with:
-          repository: kkiyama117/gaussian_job_shared
-          path: gaussian-job-shared2
       - uses: actions/setup-python@v6
         with:
           python-version: "3.x"
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: job_manager
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -67,7 +53,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: wheels-linux-${{ matrix.platform.target }}
-          path: job_manager/dist
+          path: dist
 
   musllinux:
     runs-on: ${{ matrix.platform.runner }}
@@ -84,23 +70,12 @@ jobs:
             target: armv7
     steps:
       - uses: actions/checkout@v6
-        with:
-          path: job_manager
-      - uses: actions/checkout@v6
-        with:
-          repository: kkiyama117/slurm-async-runner
-          path: slurm-async-runner2
-      - uses: actions/checkout@v6
-        with:
-          repository: kkiyama117/gaussian_job_shared
-          path: gaussian-job-shared2
       - uses: actions/setup-python@v6
         with:
           python-version: "3.x"
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: job_manager
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -109,7 +84,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: wheels-musllinux-${{ matrix.platform.target }}
-          path: job_manager/dist
+          path: dist
 
   windows:
     runs-on: ${{ matrix.platform.runner }}
@@ -127,16 +102,6 @@ jobs:
             python_arch: arm64
     steps:
       - uses: actions/checkout@v6
-        with:
-          path: job_manager
-      - uses: actions/checkout@v6
-        with:
-          repository: kkiyama117/slurm-async-runner
-          path: slurm-async-runner2
-      - uses: actions/checkout@v6
-        with:
-          repository: kkiyama117/gaussian_job_shared
-          path: gaussian-job-shared2
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
@@ -144,7 +109,6 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: job_manager
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -152,7 +116,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: wheels-windows-${{ matrix.platform.target }}
-          path: job_manager/dist
+          path: dist
 
   macos:
     runs-on: ${{ matrix.platform.runner }}
@@ -165,23 +129,12 @@ jobs:
             target: aarch64
     steps:
       - uses: actions/checkout@v6
-        with:
-          path: job_manager
-      - uses: actions/checkout@v6
-        with:
-          repository: kkiyama117/slurm-async-runner
-          path: slurm-async-runner2
-      - uses: actions/checkout@v6
-        with:
-          repository: kkiyama117/gaussian_job_shared
-          path: gaussian-job-shared2
       - uses: actions/setup-python@v6
         with:
           python-version: "3.x"
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: job_manager
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -189,33 +142,22 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: wheels-macos-${{ matrix.platform.target }}
-          path: job_manager/dist
+          path: dist
 
   sdist:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        with:
-          path: job_manager
-      - uses: actions/checkout@v6
-        with:
-          repository: kkiyama117/slurm-async-runner
-          path: slurm-async-runner2
-      - uses: actions/checkout@v6
-        with:
-          repository: kkiyama117/gaussian_job_shared
-          path: gaussian-job-shared2
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: job_manager
           command: sdist
           args: --out dist
       - name: Upload sdist
         uses: actions/upload-artifact@v6
         with:
           name: wheels-sdist
-          path: job_manager/dist
+          path: dist
 
   release:
     name: Release
