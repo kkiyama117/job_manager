@@ -13,9 +13,9 @@
 # looks real (e.g. "debug") and may or may not exist on your cluster.
 
 [slurm_default]
-partition  = "REPLACE_ME"          # ← set to a real partition on your cluster (sinfo -s)
+partition  = "gr10641a"          # ← set to a real partition on your cluster (sinfo -s)
 time_limit = "00:10:00"
 job_name   = "jm-simple"
 
 [directories]
-project_root = "REPLACE_ME"        # ← absolute, writable path on the cluster filesystem
+project_root = "$HOME/.cache/job_manager_test/simple/inputs"        # ← absolute, writable path on the cluster filesystem
