@@ -69,7 +69,7 @@ impl FlowRun {
             .flow
             .jobs
             .get(jid)
-            .ok_or_else(|| JobManagerError::MissingPlanEntry {
+            .ok_or_else(|| JobManagerError::JobNotFound {
                 flow: self.flow_uuid,
                 job: jid.clone(),
             })?;
