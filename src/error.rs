@@ -62,8 +62,13 @@ pub enum JobManagerError {
         reason: String,
     },
 
-    #[error("dependency cycle detected in flow {flow}")]
-    DependencyCycle { flow: uuid::Uuid },
+    #[error(
+        "dependency cycle detected in flow {flow}; remaining jobs (cycle members or downstream of them): {remaining:?}"
+    )]
+    DependencyCycle {
+        flow: uuid::Uuid,
+        remaining: Vec<gaussian_job_shared::entities::workflow::JobId>,
+    },
 
     #[error("missing plan entry for job {job} in flow {flow}")]
     MissingPlanEntry {
