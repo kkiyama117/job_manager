@@ -85,8 +85,8 @@ any parent is `Failed`/`Skipped`, carrying the actual culprit `JobId` in
 The `jm` binary is built alongside the library (`cargo build`).
 
 ```bash
-# 1. (dry-run) render batch.bash only — no sbatch call
-jm --root /work run <flow_uuid>
+# 1. render batch.bash only — no sbatch call
+jm --root /work render <flow_uuid>
 
 # 2. submit to SLURM (or DryRunExecutor + InMemoryQuerier when --dry-run)
 jm --root /work submit <flow_uuid>
@@ -99,10 +99,11 @@ jm --root /work tick <flow_uuid>
 jm --root /work show <flow_uuid>
 
 # 5. cross-flow search
-jm search /work --program g16
+jm --root /work search --program g16
 ```
 
-`--root` accepts an explicit path or falls back to `JM_ROOT`. Paths are
+`--root` accepts an explicit path or falls back to `JM_ROOT`, and is
+required for every subcommand including `search`. Paths are
 canonicalized (resolves `..` and symlinks). `<flow_uuid>` may be a bare
 UUID string or an absolute path whose last component is the UUID.
 

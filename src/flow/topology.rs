@@ -38,7 +38,16 @@ pub fn topological_order(
     }
 
     if order.len() != jobs.len() {
-        return Err(JobManagerError::DependencyCycle { flow: flow_uuid });
+        // Any job whose indegree never reached 0 is either part of the cycle
+        // or downstream of it — both are equally useful for diagnostics.
+        let remaining: Vec<JobId> = indeg
+            .iter()
+            .filter_map(|(jid, c)| if *c > 0 { Some(jid.clone()) } else { None })
+            .collect();
+        return Err(JobManagerError::DependencyCycle {
+            flow: flow_uuid,
+            remaining,
+        });
     }
     Ok(order)
 }
@@ -123,9 +132,17 @@ mod tests {
         );
 
         let result = topological_order(&jobs, uuid::Uuid::nil());
-        assert!(matches!(
-            result,
-            Err(JobManagerError::DependencyCycle { .. })
-        ));
+        let err = result.unwrap_err();
+        match &err {
+            JobManagerError::DependencyCycle { remaining, .. } => {
+                assert_eq!(remaining.len(), 2);
+                assert!(remaining.contains(&a));
+                assert!(remaining.contains(&b));
+            }
+            _ => panic!("expected DependencyCycle, got {err:?}"),
+        }
+        let msg = err.to_string();
+        assert!(msg.contains("\"a\""), "msg should name 'a': {msg}");
+        assert!(msg.contains("\"b\""), "msg should name 'b': {msg}");
     }
 }

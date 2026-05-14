@@ -40,43 +40,64 @@ async fn async_read_job_run(path: PathBuf) -> Result<JobRun, JobManagerError> {
         .map_err(|e| JobManagerError::Other(format!("read_job_run blocking task: {e}")))?
 }
 
-/// Write `batch.bash` atomically: write to a PID-suffixed tmp file in the
-/// same directory, restrict permissions to owner-only on Unix, then rename
-/// over `path`. Prevents a window in which another process can race-read
-/// or modify the script between the initial write and `sbatch` picking it
-/// up. The PID suffix also avoids tmp-name collisions if two parallel
-/// `submit` calls happen to target the same job dir.
+/// Write `batch.bash` atomically: open a PID-suffixed tmp file in the
+/// same directory, write the body, **fsync**, restrict permissions to
+/// owner-only on Unix, then rename over `path`. Prevents (a) a window in
+/// which another process can race-read or modify the script between the
+/// initial write and `sbatch` picking it up, and (b) a zero-length file
+/// surviving a kernel panic / power loss between write and rename.
 async fn atomic_write_batch_bash(
     path: &std::path::Path,
     body: &[u8],
 ) -> Result<(), JobManagerError> {
+    use tokio::io::AsyncWriteExt;
+
     let file_name = path
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| JobManagerError::Other(format!("invalid batch path: {}", path.display())))?;
     let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let tmp = parent.join(format!(".{}.{}.tmp", file_name, std::process::id()));
+    // Use the same pid + nanos + thread-id suffix scheme as persistence/
+    // so concurrent writers in the same process can't trample each other.
+    let suffix = crate::persistence::tmp_extension();
+    let tmp = parent.join(format!(".{file_name}.{suffix}"));
 
-    let write_result = tokio::fs::write(&tmp, body).await;
-    if let Err(e) = write_result {
+    let io_err = |source| JobManagerError::Io {
+        path: tmp.clone(),
+        source,
+    };
+
+    let write_and_sync = async {
+        let mut f = tokio::fs::File::create(&tmp).await.map_err(io_err)?;
+        f.write_all(body).await.map_err(io_err)?;
+        f.sync_all().await.map_err(io_err)?;
+        Ok::<(), JobManagerError>(())
+    };
+
+    if let Err(e) = write_and_sync.await {
         let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(JobManagerError::Io {
-            path: tmp.clone(),
-            source: e,
-        });
+        return Err(e);
     }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        // chmod 0600 is a defense-in-depth measure to keep secrets in the
+        // rendered script from being world-readable. On some filesystems
+        // (overlayfs / certain NFS / FAT-on-Linux / sandboxed CI) the call
+        // can fail with EPERM even though the file is fine. Treat that as
+        // a recoverable warning rather than aborting the whole submit:
+        // the security loss is small (script lives at the default mode)
+        // and the alternative is an unrunnable workflow.
         if let Err(e) =
             tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await
         {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(JobManagerError::Io {
-                path: tmp.clone(),
-                source: e,
-            });
+            eprintln!(
+                "warning: chmod 0600 failed on {} ({e}); continuing with default permissions. \
+                 If the filesystem cannot represent Unix permissions this is expected. \
+                 The script may be readable by other users on this host.",
+                tmp.display()
+            );
         }
     }
 
