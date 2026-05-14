@@ -8,6 +8,7 @@ use slurm_async_runner::JobStatus;
 
 use crate::job::lifecycle::Lifecycle;
 
+#[derive(Debug)]
 pub enum Decision {
     NoChange,
     Transition {
@@ -27,18 +28,18 @@ pub struct TickResult {
 pub fn decide_transition(
     current: Lifecycle,
     query: Option<&JobStatus>,
-    parent_lifecycles: &[Lifecycle],
+    parents: &[(JobId, Lifecycle)],
 ) -> Decision {
     if current.is_terminal() {
         return Decision::NoChange;
     }
     if matches!(current, Lifecycle::Queued)
-        && parent_lifecycles
+        && let Some((culprit, _)) = parents
             .iter()
-            .any(|p| matches!(p, Lifecycle::Failed | Lifecycle::Skipped))
+            .find(|(_, l)| matches!(l, Lifecycle::Failed | Lifecycle::Skipped))
     {
         return Decision::SkipDueToParent {
-            parent: JobId("<unknown>".to_string()),
+            parent: culprit.clone(),
         };
     }
     match query {
@@ -73,21 +74,48 @@ pub fn decide_transition(
 mod tests {
     use super::*;
 
+    fn parent(id: &str, l: Lifecycle) -> (JobId, Lifecycle) {
+        (JobId(id.to_string()), l)
+    }
+
     #[test]
     fn skip_when_parent_failed_and_current_queued() {
-        let decision = decide_transition(Lifecycle::Queued, None, &[Lifecycle::Failed]);
-        assert!(matches!(decision, Decision::SkipDueToParent { .. }));
+        let parents = vec![parent("p1", Lifecycle::Failed)];
+        let decision = decide_transition(Lifecycle::Queued, None, &parents);
+        match decision {
+            Decision::SkipDueToParent { parent } => assert_eq!(parent.0, "p1"),
+            other => panic!("expected SkipDueToParent, got {other:?}"),
+        }
     }
 
     #[test]
     fn skip_when_parent_skipped_and_current_queued() {
-        let decision = decide_transition(Lifecycle::Queued, None, &[Lifecycle::Skipped]);
-        assert!(matches!(decision, Decision::SkipDueToParent { .. }));
+        let parents = vec![parent("p1", Lifecycle::Skipped)];
+        let decision = decide_transition(Lifecycle::Queued, None, &parents);
+        match decision {
+            Decision::SkipDueToParent { parent } => assert_eq!(parent.0, "p1"),
+            other => panic!("expected SkipDueToParent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skip_records_first_failed_parent_when_multiple() {
+        let parents = vec![
+            parent("ok", Lifecycle::Success),
+            parent("bad", Lifecycle::Failed),
+            parent("also_bad", Lifecycle::Failed),
+        ];
+        let decision = decide_transition(Lifecycle::Queued, None, &parents);
+        match decision {
+            Decision::SkipDueToParent { parent } => assert_eq!(parent.0, "bad"),
+            other => panic!("expected SkipDueToParent, got {other:?}"),
+        }
     }
 
     #[test]
     fn no_change_when_all_parents_success_and_no_query() {
-        let decision = decide_transition(Lifecycle::Queued, None, &[Lifecycle::Success]);
+        let parents = vec![parent("p1", Lifecycle::Success)];
+        let decision = decide_transition(Lifecycle::Queued, None, &parents);
         assert!(matches!(decision, Decision::NoChange));
     }
 

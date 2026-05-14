@@ -183,16 +183,21 @@ impl<'r> FlowRunner<'r> {
                 continue;
             }
 
-            // Collect parent lifecycles
-            let parents = fr.parents_of(jid);
-            let parent_lifecycles: Vec<Lifecycle> = parents
+            // Collect parent (JobId, Lifecycle) pairs so SkipDueToParent
+            // can carry the actual culprit instead of a placeholder.
+            let parents_with_lifecycle: Vec<(JobId, Lifecycle)> = fr
+                .parents_of(jid)
                 .iter()
-                .filter_map(|edge| current.get(&edge.from).map(|r| r.lifecycle))
+                .filter_map(|edge| {
+                    current
+                        .get(&edge.from)
+                        .map(|r| (edge.from.clone(), r.lifecycle))
+                })
                 .collect();
 
             let slurm_status = run.slurm_jobid.and_then(|id| slurm_statuses.get(&id));
 
-            let decision = decide_transition(run.lifecycle, slurm_status, &parent_lifecycles);
+            let decision = decide_transition(run.lifecycle, slurm_status, &parents_with_lifecycle);
 
             let new_lifecycle = match &decision {
                 Decision::NoChange => {
