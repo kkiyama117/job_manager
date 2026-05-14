@@ -39,7 +39,14 @@ mod job_manager_core {
     #[pymodule_export]
     use super::view::PyCalcView;
 
+    /// Walk all `flow.toml` under `root`. Awaits to a list of items
+    /// (each either a parsed flow object or a tuple `(None, str)`
+    /// describing an unreadable entry).
     #[pyo3_stub_gen::derive::gen_stub_pyfunction()]
+    #[gen_stub(awaitable, override_return_type(
+        type_repr = "builtins.list[typing.Any]",
+        imports = ("typing", "builtins")
+    ))]
     #[pyfunction]
     fn walk_flows<'py>(py: Python<'py>, root: std::path::PathBuf) -> PyResult<Bound<'py, PyAny>> {
         super::walk::walk_flows(py, root)
@@ -96,7 +103,13 @@ mod job_manager_core {
         super::render::render_batch_bash(flow_uuid, job_id, body, params)
     }
 
+    /// Submit a flow. Awaits to a `dict[JobId, slurm_jobid]` for the
+    /// jobs that were submitted. Empty when `dry_run=True`.
     #[pyo3_stub_gen::derive::gen_stub_pyfunction()]
+    #[gen_stub(awaitable, override_return_type(
+        type_repr = "builtins.dict[builtins.str, builtins.int]",
+        imports = ("builtins")
+    ))]
     #[pyfunction]
     #[pyo3(signature = (root, flow_uuid, dry_run = false))]
     fn submit_flow<'py>(
