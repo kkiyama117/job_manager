@@ -8,6 +8,7 @@
 //! - `render_only`: same as submit render step but never calls executor
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use gaussian_job_shared::entities::workflow::JobId;
 
@@ -16,13 +17,28 @@ use crate::flow::FlowRun;
 use crate::job::Lifecycle;
 use crate::job::run::JobRun;
 use crate::jobid::parse_job_id;
-use crate::persistence::{PathResolver, write_job_run};
+use crate::persistence::{PathResolver, read_job_run, write_job_run};
 use crate::render::render_batch_bash;
 use crate::runner::transition::{Decision, TickResult, decide_transition};
 use crate::slurm::dependency;
 use crate::slurm::executor::Executor;
 use crate::slurm::querier::Querier;
 use slurm_async_runner::SbatchCmd;
+
+/// Run the synchronous `write_job_run` on a blocking-pool thread so we don't
+/// stall the tokio runtime. `path` and `run` are owned to satisfy `'static`.
+async fn async_write_job_run(path: PathBuf, run: JobRun) -> Result<(), JobManagerError> {
+    tokio::task::spawn_blocking(move || write_job_run(&path, &run))
+        .await
+        .map_err(|e| JobManagerError::Other(format!("write_job_run blocking task: {e}")))?
+}
+
+/// Async counterpart to the synchronous `read_job_run`.
+async fn async_read_job_run(path: PathBuf) -> Result<JobRun, JobManagerError> {
+    tokio::task::spawn_blocking(move || read_job_run(&path))
+        .await
+        .map_err(|e| JobManagerError::Other(format!("read_job_run blocking task: {e}")))?
+}
 
 /// FlowRunner — owns a boxed `Executor` and `Querier`, and coordinates the
 /// submit / tick / render_only operations for a given `FlowRun`.
@@ -79,15 +95,19 @@ impl<'r> FlowRunner<'r> {
 
             let batch_path = self.resolver.batch_bash(&fr.flow_uuid, jid);
             if let Some(parent) = batch_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| JobManagerError::Io {
-                    path: parent.to_path_buf(),
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| JobManagerError::Io {
+                        path: parent.to_path_buf(),
+                        source: e,
+                    })?;
+            }
+            tokio::fs::write(&batch_path, &script_content)
+                .await
+                .map_err(|e| JobManagerError::Io {
+                    path: batch_path.clone(),
                     source: e,
                 })?;
-            }
-            std::fs::write(&batch_path, &script_content).map_err(|e| JobManagerError::Io {
-                path: batch_path.clone(),
-                source: e,
-            })?;
 
             if dry_run {
                 continue;
@@ -131,7 +151,7 @@ impl<'r> FlowRunner<'r> {
                 note: None,
             };
             let status_path = self.resolver.status_file(&fr.flow_uuid, jid);
-            write_job_run(&status_path, &run)?;
+            async_write_job_run(status_path, run).await?;
         }
 
         Ok(submitted)
@@ -152,8 +172,8 @@ impl<'r> FlowRunner<'r> {
         let mut current: BTreeMap<JobId, JobRun> = BTreeMap::new();
         for jid in &order {
             let path = self.resolver.status_file(&fr.flow_uuid, jid);
-            if path.exists() {
-                let run = crate::persistence::read_job_run(&path)?;
+            if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+                let run = async_read_job_run(path).await?;
                 current.insert(jid.clone(), run);
             }
         }
@@ -221,7 +241,7 @@ impl<'r> FlowRunner<'r> {
                 note: run.note.clone(),
             };
             let path = self.resolver.status_file(&fr.flow_uuid, jid);
-            write_job_run(&path, &updated)?;
+            async_write_job_run(path, updated.clone()).await?;
 
             transitions.insert(jid.clone(), decision);
 
