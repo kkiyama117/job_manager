@@ -84,13 +84,21 @@ find examples/simple/inputs -type d -empty -delete
 
 ## Run on real SLURM
 
-`echo` + `sleep 2` works on any cluster, but you'll want to adjust
-two values in `inputs/common.toml` first:
+The committed `inputs/common.toml` ships with two `REPLACE_ME`
+sentinels — they exist so `sbatch` fails fast with
+`invalid partition specified: REPLACE_ME` if you forget this step,
+rather than silently submitting under a partition that happens to be
+named the same as the placeholder. **You must override both before
+`jm submit` will reach SLURM:**
 
-| Key | Default | Set to |
+| Key | Sentinel | Set to |
 |---|---|---|
-| `[slurm_default].partition` | `"debug"` | a real partition on your cluster |
-| `[directories].project_root` | `/tmp/job-manager-example/work` | a writable absolute path under your scratch / lustre |
+| `[slurm_default].partition` | `"REPLACE_ME"` | a real partition on your cluster (run `sinfo -s` on a login node to list) |
+| `[directories].project_root` | `"REPLACE_ME"` | an absolute path you can write to (scratch / lustre) |
+
+(`echo` + `sleep 2` itself works on any cluster — no Gaussian, no
+special modules. The sentinels are about cluster-side config, not
+the workload.)
 
 You may also want to point logs somewhere persistent:
 
@@ -114,26 +122,42 @@ JM=./target/release/jm
 ROOT=/path/to/your/scratch/jm-simple-demo
 UUID=01999999-0000-7000-8000-000000000000
 
-# 1. Stage the inputs under <ROOT>/
+# 1. Stage the inputs under <ROOT>/  — copy first, then edit the copy
+#    so the committed example stays clean.
 mkdir -p "$ROOT/$UUID"
 cp examples/simple/inputs/common.toml          "$ROOT/common.toml"
 cp examples/simple/inputs/$UUID/flow.toml      "$ROOT/$UUID/flow.toml"
 cp examples/simple/inputs/$UUID/plan.toml      "$ROOT/$UUID/plan.toml"
 
-# 2. (Optional) Render only — sanity-check the generated batch.bash
+# 2. Replace the REPLACE_ME sentinels with values for your cluster.
+#    Get a partition name from `sinfo -s` on the login node.
+PART=<your_partition>          # e.g. regular / debug / gr10641a / ...
+sed -i "s|^partition  = \"REPLACE_ME\"|partition  = \"$PART\"|"        "$ROOT/common.toml"
+sed -i "s|^project_root = \"REPLACE_ME\"|project_root = \"$ROOT/scratch\"|" "$ROOT/common.toml"
+grep -E '^(partition|project_root)' "$ROOT/common.toml"   # sanity-check
+
+# 3. (Optional) Render only — sanity-check the generated batch.bash
 "$JM" --root "$ROOT" render "$UUID"
 cat "$ROOT/$UUID/opt/batch.bash"
 
-# 3. Submit for real — calls sbatch, writes .status.toml (lifecycle=Queued)
+# 4. Submit for real — calls sbatch, writes .status.toml (lifecycle=Queued)
 "$JM" --root "$ROOT" submit "$UUID"
 # → prints { "freq": <slurm_jobid>, "opt": <slurm_jobid> }
 
-# 4. Tick — query SLURM and transition lifecycles. Run in a loop or via cron.
+# 5. Tick — query SLURM and transition lifecycles. Run in a loop or via cron.
 "$JM" --root "$ROOT" tick "$UUID"
 
-# 5. Inspect
+# 6. Inspect
 "$JM" --root "$ROOT" show "$UUID"
 ```
+
+### Common errors
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `sbatch: error: invalid partition specified: REPLACE_ME` | step 2 was skipped | `sed -i "s/REPLACE_ME/<real partition>/" "$ROOT/common.toml"` |
+| `error while loading shared libraries: libpython3.13.so.1.0` | built `jm` with default features | rebuild with `--no-default-features` (step 0) |
+| `Error: ... missing field 'partition'` | edited `common.toml` and deleted the line | `partition` is required by `SlurmJobConfig`; restore it |
 
 `tick` is idempotent and only mutates non-terminal `.status.toml`
 entries. A minimal cron entry:
