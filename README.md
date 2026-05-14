@@ -12,9 +12,6 @@ SLURM state reconciliation (tick) on top of those primitives. Cf.
 Airflow / Prefect vocabulary: `FlowRun` ≈ DAG Run, `JobRun` ≈
 TaskInstance, `Lifecycle` ≈ TaskState.
 
-See `docs/superpowers/specs/2026-05-13-job-manager-sp3-rearch-design.md`
-for the current (SP-3 v2) design rationale.
-
 ## Capabilities
 
 ### Orchestration (SP-3)
@@ -137,8 +134,6 @@ See [`docs/`](./docs/README.md) for:
   layout, data flow, lifecycle model, Pyclass Single Owner rule.
 - [`references/orchestration-systems.md`](./docs/references/orchestration-systems.md) —
   Airflow / Prefect vocabulary alignment that informs the SP-3 design.
-- `docs/superpowers/specs/` and `docs/superpowers/plans/` — design spec
-  and TDD implementation plan for each phase (SP-1, SP-2, SP-3 v1, SP-3 v2).
 
 ## Out of scope
 
