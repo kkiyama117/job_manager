@@ -25,7 +25,7 @@ program = "echo"
 body    = "echo \"[opt] flow=$JM_FLOW_UUID job=$JM_JOB_ID\"\nsleep 2\n"
 
 [jobs.opt.config]
-partition = "debug"
+partition = "REPLACE_ME"   # ← merge_with_defaults takes this over common.toml when non-empty; rewrite both before submit
 
 # --- child step: depends on `opt` finishing with exit 0 ---
 [jobs.freq]
@@ -37,4 +37,4 @@ from = "opt"
 kind = "afterok"
 
 [jobs.freq.config]
-partition = "debug"
+partition = "REPLACE_ME"   # ← merge_with_defaults takes this over common.toml when non-empty; rewrite both before submit
