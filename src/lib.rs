@@ -5,27 +5,32 @@
 mod concurrency;
 
 pub mod error;
-pub mod filter;
-pub mod flow_io;
+pub mod flow;
+pub mod job;
 pub mod jobid;
-pub mod path;
+pub mod persistence;
 pub mod plan;
-pub mod slurm_facade;
-pub mod status;
-pub mod tick;
+pub mod render;
+pub mod runner;
+pub mod search;
+pub mod slurm;
 pub mod view;
 pub mod walk;
 
 pub use error::{JobManagerError, SchemaParseError};
-pub use filter::{SearchFilter, matches};
-pub use flow_io::{read_flow, write_flow};
+pub use flow::FlowRun;
+pub use job::{JobRun, Lifecycle};
 pub use jobid::{JobIdParts, build_job_id, parse_job_id, validate_job_id, validate_step_id};
-pub use path::PathResolver;
+pub use persistence::{
+    PathResolver, merge_with_defaults, read_common, read_flow, read_job_run, read_plan,
+    write_common, write_flow, write_job_run, write_plan,
+};
 pub use plan::ExperimentPlan;
-pub use plan::io::{read_plan, write_plan};
-pub use slurm_facade::{A1SlurmFacade, InMemorySlurmFacade, SlurmFacade};
-pub use status::{PerJobStatus, StatusEntry};
-pub use tick::{Decision, TickResult, decide_transition, tick_many};
+pub use render::render_batch_bash;
+pub use runner::{Decision, FlowRunner, TickResult, decide_transition};
+pub use search::{SearchFilter, matches};
+pub use slurm::executor::{DryRunExecutor, Executor, MockExecutor, SbatchExecutor};
+pub use slurm::{InMemoryQuerier, Querier, SlurmQuerier};
 pub use view::CalcView;
 pub use walk::walk_flows;
 

@@ -6,7 +6,7 @@ use std::time::Instant;
 use chrono::Utc;
 use futures::StreamExt;
 use gaussian_job_shared::entities::workflow::JobFlow;
-use job_manager::flow_io::write_flow;
+use job_manager::persistence::flow::write_flow;
 use job_manager::walk::walk_flows;
 use tempfile::TempDir;
 use uuid::Uuid;

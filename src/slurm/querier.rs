@@ -1,7 +1,7 @@
-//! SLURM query abstraction with both live (`A1SlurmFacade`) and offline
-//! (`InMemorySlurmFacade`) concrete impls.
+//! SLURM query abstraction with both live (`SlurmQuerier`) and offline
+//! (`InMemoryQuerier`) concrete impls.
 //!
-//! `SlurmFacade::query_states_batch` returns `HashMap<u64, JobStatus>`,
+//! `Querier::query` returns `HashMap<u64, JobStatus>`,
 //! transparently mirroring A1's `SlurmManager::query_job_states_batch`.
 
 use std::collections::HashMap;
@@ -13,30 +13,24 @@ use slurm_async_runner::{JobStatus, SlurmManager};
 use crate::error::JobManagerError;
 
 #[async_trait]
-pub trait SlurmFacade: Send + Sync {
-    async fn query_states_batch(
-        &self,
-        jobids: &[u64],
-    ) -> Result<HashMap<u64, JobStatus>, JobManagerError>;
+pub trait Querier: Send + Sync {
+    async fn query(&self, jobids: &[u64]) -> Result<HashMap<u64, JobStatus>, JobManagerError>;
 }
 
-/// A1-backed concrete `SlurmFacade`.
-pub struct A1SlurmFacade {
+/// A1-backed concrete `Querier`.
+pub struct SlurmQuerier {
     manager: Arc<SlurmManager>,
 }
 
-impl A1SlurmFacade {
+impl SlurmQuerier {
     pub fn new(manager: Arc<SlurmManager>) -> Self {
         Self { manager }
     }
 }
 
 #[async_trait]
-impl SlurmFacade for A1SlurmFacade {
-    async fn query_states_batch(
-        &self,
-        jobids: &[u64],
-    ) -> Result<HashMap<u64, JobStatus>, JobManagerError> {
+impl Querier for SlurmQuerier {
+    async fn query(&self, jobids: &[u64]) -> Result<HashMap<u64, JobStatus>, JobManagerError> {
         self.manager
             .query_job_states_batch(jobids)
             .await
@@ -44,26 +38,23 @@ impl SlurmFacade for A1SlurmFacade {
     }
 }
 
-/// Pre-populated in-memory `SlurmFacade`. Returns the configured
+/// Pre-populated in-memory `Querier`. Returns the configured
 /// `responses` map verbatim. Useful for tests, dry-runs, and replay
 /// against captured `sacct` snapshots — anywhere a live SLURM query is
 /// unavailable or undesirable.
-pub struct InMemorySlurmFacade {
+pub struct InMemoryQuerier {
     pub responses: HashMap<u64, JobStatus>,
 }
 
-impl InMemorySlurmFacade {
+impl InMemoryQuerier {
     pub fn new(responses: HashMap<u64, JobStatus>) -> Self {
         Self { responses }
     }
 }
 
 #[async_trait]
-impl SlurmFacade for InMemorySlurmFacade {
-    async fn query_states_batch(
-        &self,
-        jobids: &[u64],
-    ) -> Result<HashMap<u64, JobStatus>, JobManagerError> {
+impl Querier for InMemoryQuerier {
+    async fn query(&self, jobids: &[u64]) -> Result<HashMap<u64, JobStatus>, JobManagerError> {
         let mut out = HashMap::new();
         for &j in jobids {
             if let Some(s) = self.responses.get(&j) {
@@ -87,8 +78,8 @@ mod tests {
             ..Default::default()
         };
         m.insert(10u64, status);
-        let facade = InMemorySlurmFacade::new(m);
-        let r = facade.query_states_batch(&[10, 11]).await.unwrap();
+        let querier = InMemoryQuerier::new(m);
+        let r = querier.query(&[10, 11]).await.unwrap();
         assert_eq!(r.len(), 1);
         assert!(matches!(r.get(&10).unwrap().state, JobState::Running));
     }

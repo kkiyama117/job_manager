@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use crate::plan::{ExperimentPlan, io as plan_io};
+use crate::persistence::plan as plan_io;
+use crate::plan::ExperimentPlan;
 
 #[gen_stub_pyclass]
 #[pyclass(
