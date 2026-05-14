@@ -82,14 +82,22 @@ async fn atomic_write_batch_bash(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        // chmod 0600 is a defense-in-depth measure to keep secrets in the
+        // rendered script from being world-readable. On some filesystems
+        // (overlayfs / certain NFS / FAT-on-Linux / sandboxed CI) the call
+        // can fail with EPERM even though the file is fine. Treat that as
+        // a recoverable warning rather than aborting the whole submit:
+        // the security loss is small (script lives at the default mode)
+        // and the alternative is an unrunnable workflow.
         if let Err(e) =
             tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await
         {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(JobManagerError::Io {
-                path: tmp.clone(),
-                source: e,
-            });
+            eprintln!(
+                "warning: chmod 0600 failed on {} ({e}); continuing with default permissions. \
+                 If the filesystem cannot represent Unix permissions this is expected. \
+                 The script may be readable by other users on this host.",
+                tmp.display()
+            );
         }
     }
 
