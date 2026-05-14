@@ -30,3 +30,55 @@ pub(crate) fn tmp_extension() -> String {
     let tid_short: String = tid.chars().filter(|c| c.is_ascii_digit()).take(8).collect();
     format!("toml.{pid}.{nanos}.{tid_short}.tmp")
 }
+
+/// Atomic write helper: ensures parent dir, picks a unique tmp path,
+/// writes the body, fsyncs the tmp, renames over `path`, and cleans up
+/// the tmp on any failure.
+///
+/// The fsync guards against kernel panic / power loss leaving a
+/// zero-length file at `path`. Callers should still treat rename failure
+/// as fatal — the source data is in memory anyway.
+pub(crate) fn atomic_write(
+    path: &std::path::Path,
+    body: &[u8],
+) -> Result<(), crate::error::JobManagerError> {
+    use crate::error::JobManagerError;
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| JobManagerError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+
+    let tmp = path.with_extension(tmp_extension());
+
+    let write_and_sync = || -> Result<(), JobManagerError> {
+        let mut f = std::fs::File::create(&tmp).map_err(|source| JobManagerError::Io {
+            path: tmp.clone(),
+            source,
+        })?;
+        f.write_all(body).map_err(|source| JobManagerError::Io {
+            path: tmp.clone(),
+            source,
+        })?;
+        f.sync_all().map_err(|source| JobManagerError::Io {
+            path: tmp.clone(),
+            source,
+        })?;
+        Ok(())
+    };
+
+    let result = write_and_sync().and_then(|()| {
+        std::fs::rename(&tmp, path).map_err(|source| JobManagerError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    });
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}

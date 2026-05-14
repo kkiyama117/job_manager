@@ -21,34 +21,8 @@ pub fn read_plan(path: &Path) -> Result<ExperimentPlan, JobManagerError> {
 /// Write `plan` to `path` atomically (write to `<path>.tmp` then rename).
 /// Creates parent directories if missing (対称: `flow_io::write_flow`)。
 pub fn write_plan(path: &Path, plan: &ExperimentPlan) -> Result<(), JobManagerError> {
-    // M-4: write_flow と同じく親 dir を自動作成し、呼び側の create_dir_all 重複を解消。
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| JobManagerError::Io {
-            path: parent.to_path_buf(),
-            source: e,
-        })?;
-    }
     let text = toml::to_string_pretty(plan)?;
-    // Suffix tmp file name with PID + nanos + thread id so neither cross-
-    // process nor intra-process concurrent writers collide on the same
-    // intermediate path.
-    let tmp = path.with_extension(super::tmp_extension());
-    let result = std::fs::write(&tmp, text)
-        .map_err(|e| JobManagerError::Io {
-            path: tmp.clone(),
-            source: e,
-        })
-        .and_then(|()| {
-            std::fs::rename(&tmp, path).map_err(|e| JobManagerError::Io {
-                path: path.to_path_buf(),
-                source: e,
-            })
-        });
-    if result.is_err() {
-        // L-3: write/rename どちらの失敗でも tmp が残る可能性があるため best-effort で削除。
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    super::atomic_write(path, text.as_bytes())
 }
 
 #[cfg(test)]

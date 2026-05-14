@@ -18,36 +18,11 @@ pub fn read_flow(path: &Path) -> Result<JobFlow, JobManagerError> {
     })
 }
 
-/// Write `flow` to `path` atomically (write to `<path>.tmp` then rename).
+/// Write `flow` to `path` atomically (tmp + fsync + rename).
 /// Creates parent directories if missing.
 pub fn write_flow(path: &Path, flow: &JobFlow) -> Result<(), JobManagerError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| JobManagerError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
     let body = toml::to_string_pretty(flow)?;
-    // Suffix tmp file name with PID + nanos + thread id so neither cross-
-    // process nor intra-process concurrent writers collide on the same
-    // intermediate path.
-    let tmp = path.with_extension(super::tmp_extension());
-    let result = std::fs::write(&tmp, body)
-        .map_err(|source| JobManagerError::Io {
-            path: tmp.clone(),
-            source,
-        })
-        .and_then(|()| {
-            std::fs::rename(&tmp, path).map_err(|source| JobManagerError::Io {
-                path: path.to_path_buf(),
-                source,
-            })
-        });
-    if result.is_err() {
-        // L-3: write/rename どちらの失敗でも tmp が残る可能性があるため best-effort で削除。
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    super::atomic_write(path, body.as_bytes())
 }
 
 #[cfg(test)]

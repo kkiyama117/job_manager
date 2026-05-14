@@ -40,16 +40,18 @@ async fn async_read_job_run(path: PathBuf) -> Result<JobRun, JobManagerError> {
         .map_err(|e| JobManagerError::Other(format!("read_job_run blocking task: {e}")))?
 }
 
-/// Write `batch.bash` atomically: write to a PID-suffixed tmp file in the
-/// same directory, restrict permissions to owner-only on Unix, then rename
-/// over `path`. Prevents a window in which another process can race-read
-/// or modify the script between the initial write and `sbatch` picking it
-/// up. The PID suffix also avoids tmp-name collisions if two parallel
-/// `submit` calls happen to target the same job dir.
+/// Write `batch.bash` atomically: open a PID-suffixed tmp file in the
+/// same directory, write the body, **fsync**, restrict permissions to
+/// owner-only on Unix, then rename over `path`. Prevents (a) a window in
+/// which another process can race-read or modify the script between the
+/// initial write and `sbatch` picking it up, and (b) a zero-length file
+/// surviving a kernel panic / power loss between write and rename.
 async fn atomic_write_batch_bash(
     path: &std::path::Path,
     body: &[u8],
 ) -> Result<(), JobManagerError> {
+    use tokio::io::AsyncWriteExt;
+
     let file_name = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -60,13 +62,21 @@ async fn atomic_write_batch_bash(
     let suffix = crate::persistence::tmp_extension();
     let tmp = parent.join(format!(".{file_name}.{suffix}"));
 
-    let write_result = tokio::fs::write(&tmp, body).await;
-    if let Err(e) = write_result {
+    let io_err = |source| JobManagerError::Io {
+        path: tmp.clone(),
+        source,
+    };
+
+    let write_and_sync = async {
+        let mut f = tokio::fs::File::create(&tmp).await.map_err(io_err)?;
+        f.write_all(body).await.map_err(io_err)?;
+        f.sync_all().await.map_err(io_err)?;
+        Ok::<(), JobManagerError>(())
+    };
+
+    if let Err(e) = write_and_sync.await {
         let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(JobManagerError::Io {
-            path: tmp.clone(),
-            source: e,
-        });
+        return Err(e);
     }
 
     #[cfg(unix)]

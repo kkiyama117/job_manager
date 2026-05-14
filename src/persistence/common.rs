@@ -20,32 +20,8 @@ pub fn read_common(path: &Path) -> Result<CommonConfig, JobManagerError> {
 }
 
 pub fn write_common(path: &Path, common: &CommonConfig) -> Result<(), JobManagerError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| JobManagerError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
     let text = toml::to_string(common)?;
-    // Suffix tmp file name with PID + nanos + thread id so neither cross-
-    // process nor intra-process concurrent writers collide on the same
-    // intermediate path.
-    let tmp = path.with_extension(super::tmp_extension());
-    let result = std::fs::write(&tmp, text)
-        .map_err(|source| JobManagerError::Io {
-            path: tmp.clone(),
-            source,
-        })
-        .and_then(|()| {
-            std::fs::rename(&tmp, path).map_err(|source| JobManagerError::Io {
-                path: path.to_path_buf(),
-                source,
-            })
-        });
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    super::atomic_write(path, text.as_bytes())
 }
 
 /// Merge `override_` on top of `common.slurm_default`.
