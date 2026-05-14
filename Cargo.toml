@@ -82,7 +82,10 @@ pyo3-async-runtimes = { version = "0.28", features = [
 pyo3-log = { version = "0.13", optional = true }
 pythonize = { version = "0.28", optional = true }
 
-pyo3-stub-gen = { git = "https://github.com/Jij-Inc/pyo3-stub-gen", rev = "bcfdbb0ab0832009c69d825f92560cf78ae09690", default-features = false, features = [
+# Pinned to kkiyama117/pyo3-stub-gen which carries the
+# `#[gen_stub(awaitable)]` patch (upstream issue #326). Bump back to the
+# upstream Jij-Inc rev once the PR is merged and released.
+pyo3-stub-gen = { git = "https://github.com/kkiyama117/pyo3-stub-gen", rev = "a56406cb01ed9b0d0322bec59489e7017acb371b", default-features = false, features = [
   "infer_signature",
 ], optional = true }
 

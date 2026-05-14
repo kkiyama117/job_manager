@@ -39,17 +39,12 @@ mod job_manager_core {
     #[pymodule_export]
     use super::view::PyCalcView;
 
-    /// Walk all `flow.toml` under `root`. Returns a coroutine that resolves
-    /// to a list of items (each either a parsed flow object or a tuple
-    /// `(None, str)` describing an unreadable entry).
-    ///
-    /// `override_return_type` pins the awaited result type because
-    /// pyo3-stub-gen cannot yet infer `Coroutine[..., T]` from
-    /// `PyResult<Bound<'py, PyAny>>` (the shape required by
-    /// `pyo3_async_runtimes::future_into_py`).
+    /// Walk all `flow.toml` under `root`. Awaits to a list of items
+    /// (each either a parsed flow object or a tuple `(None, str)`
+    /// describing an unreadable entry).
     #[pyo3_stub_gen::derive::gen_stub_pyfunction()]
-    #[gen_stub(override_return_type(
-        type_repr = "typing.Coroutine[typing.Any, typing.Any, builtins.list[typing.Any]]",
+    #[gen_stub(awaitable, override_return_type(
+        type_repr = "builtins.list[typing.Any]",
         imports = ("typing", "builtins")
     ))]
     #[pyfunction]
@@ -108,16 +103,12 @@ mod job_manager_core {
         super::render::render_batch_bash(flow_uuid, job_id, body, params)
     }
 
-    /// Submit a flow. Returns a coroutine that resolves to a
-    /// `dict[JobId, slurm_jobid]` for the jobs that were submitted.
-    /// Empty when `dry_run=True`.
-    ///
-    /// `override_return_type` pins the awaited result type — see the
-    /// note on `walk_flows` for why.
+    /// Submit a flow. Awaits to a `dict[JobId, slurm_jobid]` for the
+    /// jobs that were submitted. Empty when `dry_run=True`.
     #[pyo3_stub_gen::derive::gen_stub_pyfunction()]
-    #[gen_stub(override_return_type(
-        type_repr = "typing.Coroutine[typing.Any, typing.Any, builtins.dict[builtins.str, builtins.int]]",
-        imports = ("typing", "builtins")
+    #[gen_stub(awaitable, override_return_type(
+        type_repr = "builtins.dict[builtins.str, builtins.int]",
+        imports = ("builtins")
     ))]
     #[pyfunction]
     #[pyo3(signature = (root, flow_uuid, dry_run = false))]

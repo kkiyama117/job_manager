@@ -167,36 +167,25 @@ def render_batch_bash(
     body: builtins.str,
     params: typing.Mapping[builtins.str, builtins.str],
 ) -> builtins.str: ...
-def submit_flow(
+async def submit_flow(
     root: builtins.str | os.PathLike | pathlib.Path,
     flow_uuid: builtins.str,
     dry_run: builtins.bool = False,
-) -> typing.Coroutine[
-    typing.Any, typing.Any, builtins.dict[builtins.str, builtins.int]
-]:
+) -> builtins.dict[builtins.str, builtins.int]:
     r"""
-    Submit a flow. Returns a coroutine that resolves to a
-    `dict[JobId, slurm_jobid]` for the jobs that were submitted.
-    Empty when `dry_run=True`.
-
-    `override_return_type` pins the awaited result type — see the
-    note on `walk_flows` for why.
+    Submit a flow. Awaits to a `dict[JobId, slurm_jobid]` for the
+    jobs that were submitted. Empty when `dry_run=True`.
     """
 
 def validate_job_id(s: builtins.str) -> builtins.str: ...
 def validate_step_id(s: builtins.str) -> builtins.str: ...
-def walk_flows(
+async def walk_flows(
     root: builtins.str | os.PathLike | pathlib.Path,
-) -> typing.Coroutine[typing.Any, typing.Any, builtins.list[typing.Any]]:
+) -> builtins.list[typing.Any]:
     r"""
-    Walk all `flow.toml` under `root`. Returns a coroutine that resolves
-    to a list of items (each either a parsed flow object or a tuple
-    `(None, str)` describing an unreadable entry).
-
-    `override_return_type` pins the awaited result type because
-    pyo3-stub-gen cannot yet infer `Coroutine[..., T]` from
-    `PyResult<Bound<'py, PyAny>>` (the shape required by
-    `pyo3_async_runtimes::future_into_py`).
+    Walk all `flow.toml` under `root`. Awaits to a list of items
+    (each either a parsed flow object or a tuple `(None, str)`
+    describing an unreadable entry).
     """
 
 def write_common(
