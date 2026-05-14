@@ -27,7 +27,9 @@ pub fn write_common(path: &Path, common: &CommonConfig) -> Result<(), JobManager
         })?;
     }
     let text = toml::to_string(common)?;
-    let tmp = path.with_extension("toml.tmp");
+    // Suffix tmp file name with PID so two processes writing the same path
+    // in parallel don't trample each other's intermediate state.
+    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
     let result = std::fs::write(&tmp, text)
         .map_err(|source| JobManagerError::Io {
             path: tmp.clone(),
