@@ -85,8 +85,8 @@ any parent is `Failed`/`Skipped`, carrying the actual culprit `JobId` in
 The `jm` binary is built alongside the library (`cargo build`).
 
 ```bash
-# 1. (dry-run) render batch.bash only — no sbatch call
-jm --root /work run <flow_uuid>
+# 1. render batch.bash only — no sbatch call
+jm --root /work render <flow_uuid>
 
 # 2. submit to SLURM (or DryRunExecutor + InMemoryQuerier when --dry-run)
 jm --root /work submit <flow_uuid>

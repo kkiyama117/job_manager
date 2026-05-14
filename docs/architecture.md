@@ -362,7 +362,7 @@ exposes 5 subcommands wired to `FlowRunner` via clap:
 
 | Subcommand | Action | Executor / Querier pair |
 |---|---|---|
-| `run <uuid>` | render batch.bash only | `DryRunExecutor + InMemoryQuerier` |
+| `render <uuid>` | render batch.bash only | `DryRunExecutor + InMemoryQuerier` |
 | `submit <uuid> [--dry-run]` | render + sbatch + write `.status.toml` | `--dry-run` → `DryRun + InMemory`; else `SbatchExecutor + SlurmQuerier` |
 | `tick <uuid>` | query SLURM and apply transitions | `DryRunExecutor + SlurmQuerier` (executor unused) |
 | `show <uuid>` | read flow + per-job `.status.toml` | (none; pure reads) |

@@ -242,7 +242,7 @@ this is wired up automatically.
 ```bash
 # Build the binary (debug)
 cargo build --bin jm
-./target/debug/jm --root /work run    <flow_uuid>
+./target/debug/jm --root /work render <flow_uuid>
 ./target/debug/jm --root /work submit <flow_uuid> --dry-run
 ./target/debug/jm --root /work tick   <flow_uuid>
 ./target/debug/jm --root /work show   <flow_uuid>

@@ -16,8 +16,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Render batch.bash only.
-    Run { target: String },
+    /// Render batch.bash only — no sbatch call.
+    Render { target: String },
     /// Submit to SLURM (or DryRun).
     Submit {
         target: String,
@@ -39,9 +39,9 @@ enum Cmd {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Run { ref target } => {
+        Cmd::Render { ref target } => {
             let root = resolve_root(&cli)?;
-            cmd_run(&root, target).await
+            cmd_render(&root, target).await
         }
         Cmd::Submit {
             ref target,
@@ -92,7 +92,7 @@ fn parse_target(_root: &std::path::Path, target: &str) -> anyhow::Result<uuid::U
     uuid::Uuid::parse_str(target).map_err(|e| anyhow::anyhow!("invalid uuid: {e}"))
 }
 
-async fn cmd_run(root: &std::path::Path, target: &str) -> anyhow::Result<()> {
+async fn cmd_render(root: &std::path::Path, target: &str) -> anyhow::Result<()> {
     use job_manager::flow::FlowRun;
     use job_manager::persistence::PathResolver;
     use job_manager::runner::flow::FlowRunner;
