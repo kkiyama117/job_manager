@@ -11,7 +11,7 @@ use gaussian_job_shared::entities::workflow::JobFlow;
 
 use crate::concurrency::parallelism;
 use crate::error::JobManagerError;
-use crate::flow_io::read_flow;
+use crate::persistence::flow::read_flow;
 
 /// Return paths to all candidate `flow.toml` files (synchronous; cheap).
 fn candidate_paths(root: &Path) -> Result<Vec<PathBuf>, JobManagerError> {
@@ -70,7 +70,7 @@ pub fn walk_flows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flow_io::write_flow;
+    use crate::persistence::flow::write_flow;
     use chrono::Utc;
     use futures::StreamExt;
     use std::collections::BTreeMap;

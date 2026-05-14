@@ -29,7 +29,9 @@ pub fn write_plan(path: &Path, plan: &ExperimentPlan) -> Result<(), JobManagerEr
         })?;
     }
     let text = toml::to_string_pretty(plan)?;
-    let tmp = path.with_extension("toml.tmp");
+    // Suffix tmp file name with PID so two processes writing the same path
+    // in parallel don't trample each other's intermediate state.
+    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
     let result = std::fs::write(&tmp, text)
         .map_err(|e| JobManagerError::Io {
             path: tmp.clone(),
@@ -127,7 +129,7 @@ route = "# x"
 
     #[test]
     fn write_plan_cleans_up_tmp_on_rename_failure() {
-        // L-3: rename 失敗時に .toml.tmp が残らないことを検証。
+        // L-3: rename 失敗時に .toml.<pid>.tmp が残らないことを検証。
         // target が既存ディレクトリだと rename(file, dir) は失敗するので、それで誘発する。
         let dir = tempdir().unwrap();
         let path = dir.path().join("plan.toml");
@@ -135,8 +137,18 @@ route = "# x"
         let p = sample_plan();
         let result = write_plan(&path, &p);
         assert!(result.is_err());
-        let tmp = path.with_extension("toml.tmp");
-        assert!(!tmp.exists(), "tmp leaked at {tmp:?}");
+        let leaks: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| {
+                let p = e.ok()?.path();
+                let is_tmp = p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|n| n.ends_with(".tmp"));
+                if is_tmp { Some(p) } else { None }
+            })
+            .collect();
+        assert!(leaks.is_empty(), "tmp leaked: {leaks:?}");
     }
 
     #[test]

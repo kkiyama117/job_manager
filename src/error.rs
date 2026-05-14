@@ -37,6 +37,12 @@ pub enum JobManagerError {
         job: gaussian_job_shared::entities::workflow::JobId,
     },
 
+    #[error("sbatch submission failed: {source}")]
+    SubmitFailed {
+        #[source]
+        source: anyhow::Error,
+    },
+
     #[error("slurm facade error: {0}")]
     Slurm(String),
 
@@ -53,6 +59,21 @@ pub enum JobManagerError {
     JobIdParseError {
         id: String,
         piece: String,
+        reason: String,
+    },
+
+    #[error("dependency cycle detected in flow {flow}")]
+    DependencyCycle { flow: uuid::Uuid },
+
+    #[error("missing plan entry for job {job} in flow {flow}")]
+    MissingPlanEntry {
+        flow: uuid::Uuid,
+        job: gaussian_job_shared::entities::workflow::JobId,
+    },
+
+    #[error("bash render failed for job {job}: {reason}")]
+    RenderError {
+        job: gaussian_job_shared::entities::workflow::JobId,
         reason: String,
     },
 

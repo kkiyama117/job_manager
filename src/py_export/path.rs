@@ -4,7 +4,7 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use crate::path::PathResolver as Inner;
+use crate::persistence::path::PathResolver as Inner;
 
 #[gen_stub_pyclass]
 #[pyclass(name = "PathResolver", frozen)]

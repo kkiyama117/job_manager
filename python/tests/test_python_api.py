@@ -50,8 +50,8 @@ def test_search_filter_construction_with_defaults():
     assert f2.flow_uuid_prefix == "0199"
 
 
-def test_per_job_status_enum_values():
-    assert job_manager.PerJobStatus.Queued != job_manager.PerJobStatus.Running
+def test_lifecycle_enum_values():
+    assert job_manager.Lifecycle.Queued != job_manager.Lifecycle.Running
 
 
 def test_walk_flows_empty_dir_returns_empty_list():

@@ -16,6 +16,10 @@ name = "job_manager"
 name = "stub_gen"
 required-features = ["stub_gen"]
 
+[[bin]]
+name = "jm"
+path = "src/bin/jm.rs"
+
 [dependencies]
 anyhow = "1.0"
 thiserror = "2.0"
@@ -40,6 +44,8 @@ serde_json = "1.0"
 toml = "1.1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.23", features = ["serde", "v7"] }
+
+clap = { version = "4", features = ["derive"] }
 
 # upstream crates — Rust-only consumption (no extension-module).
 #
@@ -84,6 +90,8 @@ pyo3-stub-gen = { git = "https://github.com/Jij-Inc/pyo3-stub-gen", rev = "bcfdb
 tempfile = "3.10"
 rstest = "0.23"
 tokio = { version = "1.0", features = ["test-util"] }
+assert_cmd = "2.0"
+predicates = "3.0"
 
 [features]
 default = ["pyo3", "stub_gen"]
