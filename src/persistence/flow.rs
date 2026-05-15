@@ -35,8 +35,19 @@ fn inject_partition_defaults(
             None => continue,
         };
 
-        if cfg_t.contains_key("partition") {
-            continue;
+        // M-4: validate `partition`'s TOML type explicitly so a hand-written
+        // `partition = 42` (or array, table, …) raises a clear, job-pointed
+        // error here, instead of slipping through and surfacing later as a
+        // confusing TomlParse from `v.try_into::<JobFlow>()`.
+        match cfg_t.get("partition") {
+            Some(v) if v.is_str() => continue,
+            Some(v) => {
+                return Err(JobManagerError::PartitionWrongType {
+                    job: JobId(job_id_str.clone()),
+                    found: v.type_str(),
+                });
+            }
+            None => {}
         }
 
         match common_partition {
@@ -276,6 +287,57 @@ body = "true"
         match err {
             JobManagerError::PartitionMissing { job } => assert_eq!(job.0, "opt"),
             other => panic!("expected PartitionMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inject_rejects_non_string_partition_with_pointed_error() {
+        // M-4: partition = 42 (or any non-string) must surface a typed
+        // PartitionWrongType pointing at the job + offending TOML type,
+        // not flow through and trigger a confusing TomlParse later.
+        let mut v: toml::Value = toml::from_str(
+            r#"
+uuid = "01999999-0000-7000-8000-000000000000"
+created_at = "2026-05-15T00:00:00Z"
+[jobs.opt]
+program = "echo"
+body = "true"
+[jobs.opt.config]
+partition = 42
+"#,
+        )
+        .unwrap();
+        let err = super::inject_partition_defaults(&mut v, Some("long")).unwrap_err();
+        match err {
+            JobManagerError::PartitionWrongType { job, found } => {
+                assert_eq!(job.0, "opt");
+                assert_eq!(found, "integer");
+            }
+            other => panic!("expected PartitionWrongType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inject_rejects_array_partition() {
+        let mut v: toml::Value = toml::from_str(
+            r#"
+uuid = "01999999-0000-7000-8000-000000000000"
+created_at = "2026-05-15T00:00:00Z"
+[jobs.opt]
+program = "echo"
+body = "true"
+[jobs.opt.config]
+partition = ["short", "long"]
+"#,
+        )
+        .unwrap();
+        let err = super::inject_partition_defaults(&mut v, Some("long")).unwrap_err();
+        match err {
+            JobManagerError::PartitionWrongType { job, found } => {
+                assert_eq!(job.0, "opt");
+                assert_eq!(found, "array");
+            }
+            other => panic!("expected PartitionWrongType, got {other:?}"),
         }
     }
 
