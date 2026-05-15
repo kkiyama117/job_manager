@@ -91,6 +91,21 @@ pub enum JobManagerError {
         limit: u64,
     },
 
+    #[error(
+        "partition is required but missing: job={job} has no partition and common.toml [slurm_default] has no partition either"
+    )]
+    PartitionMissing {
+        job: gaussian_job_shared::entities::workflow::JobId,
+    },
+
+    #[error(
+        "effective snapshot missing at {path} (uuid={uuid}): run `jm render <uuid>` first to materialize"
+    )]
+    SnapshotMissing { path: PathBuf, uuid: String },
+
+    #[error("cannot infer root from flow.toml path {path}: expected <root>/<flow_uuid>/flow.toml layout")]
+    RootInferenceFailed { path: PathBuf },
+
     #[error("{0}")]
     Other(String),
 }
@@ -139,5 +154,34 @@ mod tests {
         let err = JobManagerError::ReservedJobId("flow".to_string());
         assert!(err.to_string().contains("flow"));
         assert!(err.to_string().contains("reserved"));
+    }
+
+    #[test]
+    fn partition_missing_carries_job_id() {
+        let err = JobManagerError::PartitionMissing {
+            job: gaussian_job_shared::entities::workflow::JobId("opt".to_string()),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("opt"), "msg = {msg}");
+        assert!(msg.contains("partition"), "msg = {msg}");
+    }
+
+    #[test]
+    fn snapshot_missing_carries_path_and_uuid() {
+        let err = JobManagerError::SnapshotMissing {
+            path: PathBuf::from("/work/abc/.jm/flow.effective.toml"),
+            uuid: "01999999-0000-7000-8000-000000000000".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/work/abc/.jm/flow.effective.toml"), "msg = {msg}");
+        assert!(msg.contains("jm render"), "msg should hint at render: {msg}");
+    }
+
+    #[test]
+    fn root_inference_failed_carries_path() {
+        let err = JobManagerError::RootInferenceFailed {
+            path: PathBuf::from("/tmp/x.toml"),
+        };
+        assert!(err.to_string().contains("/tmp/x.toml"));
     }
 }
