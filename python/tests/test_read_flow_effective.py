@@ -53,7 +53,12 @@ body = "true\\n"
         uuid,
         "--effective-only",
     ]
-    r = subprocess.run(cmd, cwd=repo_root, capture_output=True, text=True)
+    # 5 min — first invocation rebuilds the jm binary; later runs hit the
+    # build cache and finish in seconds. Surface a timeout as a clear test
+    # failure rather than a hung CI job.
+    r = subprocess.run(
+        cmd, cwd=repo_root, capture_output=True, text=True, timeout=300
+    )
     assert r.returncode == 0, f"jm render failed: stderr={r.stderr}"
 
     eff_path = flow_dir / ".jm" / "flow.effective.toml"
