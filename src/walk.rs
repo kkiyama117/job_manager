@@ -62,7 +62,10 @@ pub fn walk_flows(
                 async move {
                     tokio::task::spawn_blocking(move || read_flow(&p, &common))
                         .await
-                        .map_err(|e| JobManagerError::Other(format!("spawn_blocking join: {e}")))?
+                        .map_err(|source| JobManagerError::JoinFailed {
+                            op: "read_flow",
+                            source,
+                        })?
                 }
             })
             .buffer_unordered(parallelism);
