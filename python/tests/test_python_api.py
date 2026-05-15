@@ -38,7 +38,8 @@ def test_path_resolver_status_file_accepts_valid_job_id():
         "01997cdc-0000-7000-8000-000000000000", "opt__compound=0"
     )
     assert "opt__compound=0" in str(p)
-    assert str(p).endswith(".status.toml")
+    # F2: status file lives under .jm/<JobId>/status.toml (no dot prefix)
+    assert str(p).endswith("/.jm/opt__compound=0/status.toml")
 
 
 def test_search_filter_construction_with_defaults():
