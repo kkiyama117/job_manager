@@ -19,8 +19,7 @@ use crate::walk::walk_flows as inner_walk;
 pub fn walk_flows<'py>(py: Python<'py>, root: PathBuf) -> PyResult<Bound<'py, PyAny>> {
     let common_path = root.join("common.toml");
     let common = if common_path.exists() {
-        crate::persistence::read_common(&common_path)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+        crate::persistence::read_common(&common_path)?
     } else {
         crate::persistence::synth_empty_common()
     };

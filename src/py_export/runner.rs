@@ -33,10 +33,11 @@ pub fn submit_flow<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     future_into_py(py, async move {
         let resolver = PathResolver::new(root);
+        // uuid::Error is not a JobManagerError variant; surface as
+        // PyValueError directly.
         let uuid = uuid::Uuid::parse_str(&flow_uuid)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        let fr = FlowRun::read(&resolver, uuid)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let fr = FlowRun::read(&resolver, uuid)?;
         // Pair executor and querier consistently: dry-run stays purely
         // offline; production talks to the real sbatch + sacct via A1.
         let (exec, querier): (Box<dyn Executor>, Box<dyn Querier>) = if dry_run {
@@ -51,10 +52,7 @@ pub fn submit_flow<'py>(
             )
         };
         let runner = FlowRunner::new(exec, querier, &resolver);
-        let result = runner
-            .submit(&fr, dry_run)
-            .await
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let result = runner.submit(&fr, dry_run).await?;
         let py_dict: HashMap<String, u64> = result.into_iter().map(|(k, v)| (k.0, v)).collect();
         Ok(py_dict)
     })

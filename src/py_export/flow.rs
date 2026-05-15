@@ -22,10 +22,11 @@ impl PyFlowRun {
     #[staticmethod]
     pub fn read(root: std::path::PathBuf, flow_uuid: &str) -> PyResult<Self> {
         let resolver = PathResolver::new(root);
+        // uuid::Error is not a JobManagerError variant; surface as
+        // PyValueError directly.
         let uuid = uuid::Uuid::parse_str(flow_uuid)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        let inner = FlowRun::read(&resolver, uuid)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let inner = FlowRun::read(&resolver, uuid)?;
         Ok(Self { inner })
     }
 
