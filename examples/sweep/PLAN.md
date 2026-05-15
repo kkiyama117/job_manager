@@ -46,7 +46,7 @@ examples/sweep/
 ├── inputs/                                            ← success variant
 │   ├── common.toml
 │   └── 0199999a-0000-7000-8000-000000000000/
-│       ├── flow.toml                                  ← 7 jobs, 6 edges
+│       ├── flow.toml                                  ← 7 jobs, 6 edges (partition 省略可)
 │       └── plan.toml                                  ← 7 entries, per-compound params
 │
 ├── inputs-fail/                                       ← failure variant (separate root for clean docs)
@@ -55,21 +55,25 @@ examples/sweep/
 │       ├── flow.toml                                  ← only difference: opt__compound=1's body has `exit 1`
 │       └── plan.toml                                  ← identical content modulo uuid-tied references
 │
-├── outputs/                                           ← success snapshot (we commit dry-run batch.bash; user fills .status.toml + slurm-*.out from a real run)
+├── outputs/                                           ← success snapshot (we commit dry-run batch.bash; user fills status.toml + slurm-*.out from a real run)
 │   └── 0199999a-0000-7000-8000-000000000000/
-│       ├── prep/batch.bash
-│       ├── opt__compound=0/batch.bash
-│       ├── opt__compound=1/batch.bash
-│       ├── opt__compound=2/batch.bash
-│       ├── freq__compound=0/batch.bash
-│       ├── freq__compound=1/batch.bash
-│       └── freq__compound=2/batch.bash
+│       └── .jm/                                       ← program-managed (hidden subdir)
+│           ├── flow.effective.toml                    ← materialized snapshot
+│           ├── prep/batch.bash
+│           ├── opt__compound=0/batch.bash
+│           ├── opt__compound=1/batch.bash
+│           ├── opt__compound=2/batch.bash
+│           ├── freq__compound=0/batch.bash
+│           ├── freq__compound=1/batch.bash
+│           └── freq__compound=2/batch.bash
 │
 └── outputs-fail/                                      ← failure snapshot (same caveat)
     └── 0199999a-0000-7000-8000-000000000001/
-        ├── prep/batch.bash
-        ├── opt__compound={0,1,2}/batch.bash
-        └── freq__compound={0,1,2}/batch.bash
+        └── .jm/
+            ├── flow.effective.toml
+            ├── prep/batch.bash
+            ├── opt__compound={0,1,2}/batch.bash
+            └── freq__compound={0,1,2}/batch.bash
 ```
 
 Two separate roots (rather than one root with two flows) keep
@@ -114,7 +118,9 @@ Same shape as `examples/simple/inputs/common.toml`: two `REPLACE_ME`
 sentinels (`partition`, `project_root`), `time_limit = "00:10:00"`,
 `job_name = "jm-sweep"`. log_stdout/log_stderr template stays
 commented-out so SLURM captures land next to batch.bash when the
-operator enables them.
+operator enables them. **`partition` here flows through to every
+job's `[jobs.*.config]` automatically (F2 defaulting), so per-job
+`[jobs.X.config]` blocks can omit `partition`.**
 
 ## author.py
 
@@ -147,7 +153,7 @@ hand-edited copy of `inputs/` with one body changed and one uuid
 bumped. Keeping it manual avoids complicating author.py with branch
 logic for a single-line variant.
 
-## Expected `.status.toml` outcomes
+## Expected `status.toml` outcomes (under `.jm/<JobId>/`)
 
 ### inputs/ (success variant)
 
@@ -169,7 +175,7 @@ state = "COMPLETED"
 | `opt__compound=1` | `failed` | body `exit 1` |
 | `opt__compound=2` | `success` | independent branch |
 | `freq__compound=0` | `success` | parent succeeded |
-| `freq__compound=1` | `skipped` | `decide_transition` emits `SkipDueToParent { parent: "opt__compound=1" }`. **The culprit JobId stays in the in-memory `Decision`, not on disk** — `.status.toml` shows only `lifecycle = "skipped"` plus whatever `note` was already there (typically empty). `slurm-<jobid>.out` is also unlikely to exist because SLURM's own `afterok` cancels the child server-side before it ever runs |
+| `freq__compound=1` | `skipped` | `decide_transition` emits `SkipDueToParent { parent: "opt__compound=1" }`. **The culprit JobId stays in the in-memory `Decision`, not on disk** — `.jm/<JobId>/status.toml` shows only `lifecycle = "skipped"` plus whatever `note` was already there (typically empty). `.jm/<JobId>/slurm-*.out` is also unlikely to exist because SLURM's own `afterok` cancels the child server-side before it ever runs |
 | `freq__compound=2` | `success` | parent succeeded |
 
 This demonstrates partial completion — failure of one branch does
@@ -184,7 +190,7 @@ not cascade to sibling branches.
 5. Write `README.md`.
 6. Update `.gitignore` if needed (probably no change — already covers `slurm-*.out`).
 7. Commit + push.
-8. (Out of scope for this commit, separate user task): user runs both variants in their cluster, captures `.status.toml` + `slurm-*.out` into `outputs/` and `outputs-fail/`, commits a follow-up.
+8. (Out of scope for this commit, separate user task): user runs both variants in their cluster, captures `.jm/<JobId>/status.toml` + `.jm/<JobId>/slurm-*.out` into `outputs/` and `outputs-fail/`, commits a follow-up.
 
 ## Risks / open questions
 
@@ -195,12 +201,12 @@ not cascade to sibling branches.
   `Lifecycle::Skipped` and writes a fresh `JobRun`, but **does not
   populate `note`** — the field is `run.note.clone()`, preserving
   whatever was there before (`None`/empty by default). So on disk the
-  Skipped child's `.status.toml` shows nothing about the culprit. The
+  Skipped child's `.jm/<JobId>/status.toml` shows nothing about the culprit. The
   parent JobId is only visible to in-process callers of `tick()` who
   inspect the returned `TickResult.transitions`.
 
   Implication for the example: README must NOT claim the
-  `.status.toml` `note` field tells you which parent caused the skip.
+  `.jm/<JobId>/status.toml` `note` field tells you which parent caused the skip.
   If we want that on disk we'd need a code change (separate work).
 
 - **Q2 (RESOLVED).** `decide_transition` short-circuits on parent
@@ -212,8 +218,8 @@ not cascade to sibling branches.
   child server-side once the parent exits non-zero, typically before
   any compute node allocates the child — so **`slurm-<jobid>.out`
   usually does not exist for a Skipped child**. The
-  `outputs-fail/<uuid>/freq__compound=1/` snapshot will therefore have
-  `batch.bash` (rendered at submit) and `.status.toml`
+  `outputs-fail/<uuid>/.jm/freq__compound=1/` snapshot will therefore have
+  `batch.bash` (rendered at submit) and `status.toml`
   (lifecycle=`skipped`), but no `slurm-*.out` companion. README will
   document this.
 

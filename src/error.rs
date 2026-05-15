@@ -98,8 +98,30 @@ pub enum JobManagerError {
         job: gaussian_job_shared::entities::workflow::JobId,
     },
 
-    #[error("snapshot missing at {path} (uuid={uuid}); run `jm render {uuid}` to generate it")]
+    #[error(
+        "partition for job={job} must be a string, but found TOML type '{found}'; rewrite as `partition = \"<name>\"`"
+    )]
+    PartitionWrongType {
+        job: gaussian_job_shared::entities::workflow::JobId,
+        found: &'static str,
+    },
+
+    #[error(
+        "effective snapshot missing at {path} (uuid={uuid}): run `jm render <uuid>` first to materialize"
+    )]
     SnapshotMissing { path: PathBuf, uuid: String },
+
+    #[error(
+        "cannot infer root from flow.toml path {path}: expected <root>/<flow_uuid>/flow.toml layout"
+    )]
+    RootInferenceFailed { path: PathBuf },
+
+    #[error("{op} blocking task failed: {source}")]
+    JoinFailed {
+        op: &'static str,
+        #[source]
+        source: tokio::task::JoinError,
+    },
 
     #[error("{0}")]
     Other(String),
@@ -159,5 +181,59 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("opt"), "msg = {msg}");
         assert!(msg.contains("partition"), "msg = {msg}");
+    }
+
+    #[test]
+    fn snapshot_missing_carries_path_and_uuid() {
+        let err = JobManagerError::SnapshotMissing {
+            path: PathBuf::from("/work/abc/.jm/flow.effective.toml"),
+            uuid: "01999999-0000-7000-8000-000000000000".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/work/abc/.jm/flow.effective.toml"),
+            "msg = {msg}"
+        );
+        assert!(
+            msg.contains("jm render"),
+            "msg should hint at render: {msg}"
+        );
+    }
+
+    #[test]
+    fn root_inference_failed_carries_path() {
+        let err = JobManagerError::RootInferenceFailed {
+            path: PathBuf::from("/tmp/x.toml"),
+        };
+        assert!(err.to_string().contains("/tmp/x.toml"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn join_failed_carries_op_and_preserves_source() {
+        use std::error::Error as _;
+
+        let handle = tokio::task::spawn_blocking(|| panic!("intentional"));
+        let join_err = handle.await.expect_err("spawn_blocking should panic");
+
+        let err = JobManagerError::JoinFailed {
+            op: "write_job_run",
+            source: join_err,
+        };
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("write_job_run"),
+            "Display should include op label, got: {msg}",
+        );
+        assert!(
+            msg.contains("blocking task failed"),
+            "Display should include canonical phrase, got: {msg}",
+        );
+
+        let src = err.source().expect("JoinFailed must expose source()");
+        assert!(
+            src.is::<tokio::task::JoinError>(),
+            "source() should be the typed tokio::task::JoinError",
+        );
     }
 }

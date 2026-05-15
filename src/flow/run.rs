@@ -24,7 +24,6 @@ impl FlowRun {
         resolver: &crate::persistence::PathResolver,
         flow_uuid: uuid::Uuid,
     ) -> Result<Self, JobManagerError> {
-        let flow = crate::persistence::read_flow(&resolver.flow_toml(&flow_uuid))?;
         let plan = crate::persistence::read_plan(&resolver.plan_toml(&flow_uuid))?;
         let common_path = resolver.common_toml();
         let common = if common_path.exists() {
@@ -32,6 +31,12 @@ impl FlowRun {
         } else {
             None
         };
+        // read_flow needs a common; if user didn't provide one, fall back to a
+        // synthetic default that simply requires partition to be present in
+        // each [jobs.*.config].
+        let synth_common = crate::persistence::synth_empty_common();
+        let common_for_read = common.as_ref().unwrap_or(&synth_common);
+        let flow = crate::persistence::read_flow(&resolver.flow_toml(&flow_uuid), common_for_read)?;
         Ok(Self {
             flow_uuid,
             flow,
@@ -48,9 +53,8 @@ impl FlowRun {
         flow_uuid: uuid::Uuid,
     ) -> Result<Self, JobManagerError> {
         let plan = crate::persistence::read_plan(&resolver.plan_toml(&flow_uuid))?;
-        let flow = crate::persistence::read_flow_effective(
-            &resolver.flow_effective_toml(&flow_uuid),
-        )?;
+        let flow =
+            crate::persistence::read_flow_effective(&resolver.flow_effective_toml(&flow_uuid))?;
         Ok(Self {
             flow_uuid,
             flow,

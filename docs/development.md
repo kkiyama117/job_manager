@@ -309,6 +309,21 @@ For full feature work the project follows the superpowers planning loop:
 SP-1, SP-2, and SP-3 (v1 + v2) all follow this shape. The active spec
 is `2026-05-13-job-manager-sp3-rearch-design.md` (v2).
 
+## `.gitignore` for program-managed `.jm/`
+
+`<root>/<flow_uuid>/.jm/` (snapshot, batch.bash, status, slurm-*.out/err)
+is program-managed. To keep git tracking `flow.toml` and `plan.toml`
+while ignoring program output for a specific flow, drop a `.gitignore`
+file inside each flow_dir:
+
+```
+<root>/<flow_uuid>/.gitignore
+```
+
+containing just `.jm/`. A repo-root `.gitignore` cannot blanket-ignore
+`.jm/` because `examples/*/outputs/<uuid>/.jm/` IS commit territory
+(it's the snapshot we want shipped alongside the example).
+
 ## Commit & PR
 
 - Commit messages use Conventional Commits (`feat:`, `fix:`, `refactor:`,

@@ -147,6 +147,12 @@ mod job_manager_core {
 
     #[pyo3_stub_gen::derive::gen_stub_pyfunction()]
     #[pyfunction]
+    fn read_flow_effective(path: std::path::PathBuf) -> PyResult<String> {
+        super::persistence::read_flow_effective(path)
+    }
+
+    #[pyo3_stub_gen::derive::gen_stub_pyfunction()]
+    #[pyfunction]
     fn read_job_run(path: std::path::PathBuf) -> PyResult<super::job::PyJobRun> {
         super::job::read_job_run(path)
     }

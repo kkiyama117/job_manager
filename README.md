@@ -27,19 +27,44 @@ working root, then drive `jm` (or the Python async API) against them.
     └── plan.toml                ← ExperimentPlan — per-JobId render params
 ```
 
-After `jm submit`, the same tree fills with per-job folders:
+After `jm submit` (or `jm render`), the same tree fills with a
+program-managed `.jm/` subtree:
 
 ```
-<root>/<flow_uuid>/<JobId>/
-├── batch.bash                   ← rendered sbatch script (chmod 0600)
-├── slurm-<id>.out / .err        ← SLURM stdout/stderr
-└── .status.toml                 ← lifecycle + slurm_jobid + JobStatus
+<root>/<flow_uuid>/
+├── flow.toml                    ← user input (read-only from jm's perspective)
+├── plan.toml                    ← user input
+└── .jm/                         ← program-managed (safe to .gitignore per-flow)
+    ├── flow.effective.toml      ← materialized snapshot (Cargo.lock analogue)
+    └── <JobId>/
+        ├── batch.bash           ← rendered sbatch script (chmod 0600)
+        ├── slurm-<id>.out/.err  ← SLURM stdout/stderr
+        └── status.toml          ← lifecycle + slurm_jobid + JobStatus
 ```
 
-`PathResolver` is the single source of truth for these paths; status
-files are dot-prefixed so they don't collide with SLURM outputs or
-user files. Per-flow `common.toml` is **not** supported — there is one
-`common.toml` per root.
+`PathResolver` is the single source of truth for these paths. The
+`.jm/` subdir isolates everything `jm` writes from user-authored
+inputs, so a per-flow `.gitignore` containing just `.jm/` cleanly
+separates committed inputs from program output. Per-flow `common.toml`
+is **not** supported — there is one `common.toml` per root.
+
+### `common.toml` partition defaulting
+
+`flow.toml` may omit `[jobs.*.config] partition`; the value flows in
+from `common.toml [slurm_default] partition` at `read_flow` time. If
+both are missing the read fails with a job-pointed `PartitionMissing`
+error; a non-string `partition` value fails with `PartitionWrongType`
+naming the offending TOML type. This mirrors Airflow's `default_args`
+inheritance and Prefect's Work Pool `base_job_template` — see
+[`docs/architecture.md`](./docs/architecture.md#commontoml-as-pool-template-airflow--prefect-mapping).
+
+### `.flow.effective.toml` — materialized snapshot
+
+`jm render` and `jm submit` write `<flow_uuid>/.jm/flow.effective.toml`
+with every default resolved. `jm tick` and `jm show` read this
+snapshot (via `FlowRun::load_effective`) and do **not** need
+`common.toml` at runtime. Use `jm render --effective-only <uuid>` to
+regenerate just the snapshot without re-rendering every `batch.bash`.
 
 ### 1. Author inputs in Python
 
@@ -83,17 +108,20 @@ at the data layer.
 ### 2. Drive a flow from the shell
 
 ```bash
-# render batch.bash only — no sbatch call, useful for review
+# render every batch.bash + write .jm/flow.effective.toml snapshot
 jm --root /work render <flow_uuid>
 
-# submit all jobs in topological order (writes .status.toml as it goes)
+# regenerate ONLY .jm/flow.effective.toml without touching batch.bash
+jm --root /work render <flow_uuid> --effective-only
+
+# submit all jobs in topological order (writes .jm/<JobId>/status.toml as it goes)
 jm --root /work submit <flow_uuid>
 jm --root /work submit <flow_uuid> --dry-run     # rehearse: DryRunExecutor + InMemoryQuerier
 
-# query SLURM and reconcile every .status.toml under the flow
+# query SLURM and reconcile every status.toml under the flow (snapshot-driven; no common.toml needed)
 jm --root /work tick <flow_uuid>
 
-# inspect the flow + per-job lifecycle
+# inspect the flow + per-job lifecycle (snapshot-driven)
 jm --root /work show <flow_uuid>
 
 # cross-flow search across <root>/*/flow.toml
@@ -131,6 +159,16 @@ async def run(root: str, uuid: str):
     return jobids
 
 asyncio.run(run("/work", "01997cdc-..."))
+```
+
+Snapshot-driven reads (after `jm render` / `jm submit` has materialized
+`<flow_uuid>/.jm/flow.effective.toml`) don't need `common.toml`:
+
+```python
+from job_manager import PathResolver, read_flow_effective
+
+resolver = PathResolver("/work")
+flow = read_flow_effective(resolver.flow_effective_toml("01997cdc-..."))
 ```
 
 > ⚠ `submit_flow` / `walk_flows` bind to the **running** event loop at

@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use gaussian_job_shared::config::common::CommonConfig;
 use gaussian_job_shared::entities::workflow::{JobFlow, JobId};
 
 use crate::error::JobManagerError;
@@ -34,8 +35,19 @@ fn inject_partition_defaults(
             None => continue,
         };
 
-        if cfg_t.contains_key("partition") {
-            continue;
+        // M-4: validate `partition`'s TOML type explicitly so a hand-written
+        // `partition = 42` (or array, table, …) raises a clear, job-pointed
+        // error here, instead of slipping through and surfacing later as a
+        // confusing TomlParse from `v.try_into::<JobFlow>()`.
+        match cfg_t.get("partition") {
+            Some(v) if v.is_str() => continue,
+            Some(v) => {
+                return Err(JobManagerError::PartitionWrongType {
+                    job: JobId(job_id_str.clone()),
+                    found: v.type_str(),
+                });
+            }
+            None => {}
         }
 
         match common_partition {
@@ -52,10 +64,24 @@ fn inject_partition_defaults(
     Ok(())
 }
 
-/// Read a `JobFlow` from a TOML file at `path`.
-pub fn read_flow(path: &Path) -> Result<JobFlow, JobManagerError> {
+/// Read a `JobFlow` from a TOML file at `path`, materializing it with
+/// `common` defaults (notably injecting `partition` from `common.slurm_default`
+/// when omitted in the flow.toml). Returns `PartitionMissing { job }` if any
+/// job lacks a partition and common has none either.
+pub fn read_flow(path: &Path, common: &CommonConfig) -> Result<JobFlow, JobManagerError> {
     let text = super::read_toml_string(path)?;
-    toml::from_str(&text).map_err(|source| JobManagerError::TomlParse {
+    let mut v: toml::Value =
+        toml::from_str(&text).map_err(|source| JobManagerError::TomlParse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let common_partition = if common.slurm_default.partition.is_empty() {
+        None
+    } else {
+        Some(common.slurm_default.partition.as_str())
+    };
+    inject_partition_defaults(&mut v, common_partition)?;
+    v.try_into().map_err(|source| JobManagerError::TomlParse {
         path: path.to_path_buf(),
         source,
     })
@@ -74,14 +100,19 @@ pub fn write_flow(path: &Path, flow: &JobFlow) -> Result<(), JobManagerError> {
 /// caller at `jm render <uuid>`.
 pub fn read_flow_effective(path: &Path) -> Result<JobFlow, JobManagerError> {
     if !path.exists() {
-        // Try to extract the uuid from the path: <root>/<uuid>/.jm/flow.effective.toml
+        // Expected layout is `<root>/<uuid>/.jm/flow.effective.toml`, so the
+        // grandparent's basename is the uuid. When the path doesn't match
+        // that shape (e.g., a direct test fixture), surface a clear marker
+        // instead of a plain "<unknown>" that could be mistaken for a bug.
         let uuid_hint = path
             .parent()
             .and_then(|p| p.parent())
             .and_then(|p| p.file_name())
             .and_then(|s| s.to_str())
-            .unwrap_or("<unknown>")
-            .to_string();
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                "<path layout outside <root>/<uuid>/.jm/flow.effective.toml>".to_string()
+            });
         return Err(JobManagerError::SnapshotMissing {
             path: path.to_path_buf(),
             uuid: uuid_hint,
@@ -124,6 +155,29 @@ mod tests {
             mail_user: None,
             mail_types: None,
             resource_spec: None,
+        }
+    }
+
+    fn sample_common() -> gaussian_job_shared::config::common::CommonConfig {
+        use gaussian_job_shared::config::common::{CommonConfig, DirectoryConfig};
+        use std::path::PathBuf;
+        CommonConfig {
+            slurm_default: SlurmJobConfig {
+                partition: "long".to_string(),
+                time_limit: None,
+                log_stdout: None,
+                log_stderr: None,
+                comment: None,
+                job_name: None,
+                array_spec: None,
+                dependency: None,
+                mail_user: None,
+                mail_types: None,
+                resource_spec: None,
+            },
+            directories: DirectoryConfig {
+                project_root: PathBuf::from("/work"),
+            },
         }
     }
 
@@ -237,6 +291,57 @@ body = "true"
     }
 
     #[test]
+    fn inject_rejects_non_string_partition_with_pointed_error() {
+        // M-4: partition = 42 (or any non-string) must surface a typed
+        // PartitionWrongType pointing at the job + offending TOML type,
+        // not flow through and trigger a confusing TomlParse later.
+        let mut v: toml::Value = toml::from_str(
+            r#"
+uuid = "01999999-0000-7000-8000-000000000000"
+created_at = "2026-05-15T00:00:00Z"
+[jobs.opt]
+program = "echo"
+body = "true"
+[jobs.opt.config]
+partition = 42
+"#,
+        )
+        .unwrap();
+        let err = super::inject_partition_defaults(&mut v, Some("long")).unwrap_err();
+        match err {
+            JobManagerError::PartitionWrongType { job, found } => {
+                assert_eq!(job.0, "opt");
+                assert_eq!(found, "integer");
+            }
+            other => panic!("expected PartitionWrongType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inject_rejects_array_partition() {
+        let mut v: toml::Value = toml::from_str(
+            r#"
+uuid = "01999999-0000-7000-8000-000000000000"
+created_at = "2026-05-15T00:00:00Z"
+[jobs.opt]
+program = "echo"
+body = "true"
+[jobs.opt.config]
+partition = ["short", "long"]
+"#,
+        )
+        .unwrap();
+        let err = super::inject_partition_defaults(&mut v, Some("long")).unwrap_err();
+        match err {
+            JobManagerError::PartitionWrongType { job, found } => {
+                assert_eq!(job.0, "opt");
+                assert_eq!(found, "array");
+            }
+            other => panic!("expected PartitionWrongType, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn inject_idempotent_on_already_injected_table() {
         let mut v: toml::Value = toml::from_str(
             r#"
@@ -274,8 +379,14 @@ body = "true"
         )
         .unwrap();
         super::inject_partition_defaults(&mut v, Some("long")).unwrap();
-        assert_eq!(v["jobs"]["a"]["config"]["partition"].as_str().unwrap(), "short");
-        assert_eq!(v["jobs"]["b"]["config"]["partition"].as_str().unwrap(), "long");
+        assert_eq!(
+            v["jobs"]["a"]["config"]["partition"].as_str().unwrap(),
+            "short"
+        );
+        assert_eq!(
+            v["jobs"]["b"]["config"]["partition"].as_str().unwrap(),
+            "long"
+        );
     }
 
     #[test]
@@ -284,7 +395,7 @@ body = "true"
         let path = dir.path().join("flow.toml");
         let original = sample_flow();
         write_flow(&path, &original).unwrap();
-        let back = read_flow(&path).unwrap();
+        let back = read_flow(&path, &sample_common()).unwrap();
         assert_eq!(back.uuid, original.uuid);
         assert_eq!(back.jobs.len(), 2);
         assert!(back.jobs.contains_key(&JobId::from("g16")));
@@ -294,7 +405,7 @@ body = "true"
     fn read_missing_file_returns_io_error_with_path() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("does_not_exist.toml");
-        let err = read_flow(&path).unwrap_err();
+        let err = read_flow(&path, &sample_common()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("does_not_exist.toml"), "msg = {msg}");
     }
@@ -376,6 +487,9 @@ body = "true"
         let path = dir.path().join("flow.effective.toml");
         std::fs::write(&path, "this is = not = valid toml").unwrap();
         let err = read_flow_effective(&path).unwrap_err();
-        assert!(matches!(err, JobManagerError::TomlParse { .. }), "got {err:?}");
+        assert!(
+            matches!(err, JobManagerError::TomlParse { .. }),
+            "got {err:?}"
+        );
     }
 }

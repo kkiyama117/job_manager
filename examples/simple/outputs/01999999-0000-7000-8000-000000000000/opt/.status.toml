@@ -1,7 +1,0 @@
-lifecycle = "success"
-updated_at = "2026-05-14T16:55:44.109855832Z"
-slurm_jobid = 7543027
-
-[slurm_status]
-state = "COMPLETED"
-reason = "Prolog"

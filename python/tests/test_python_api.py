@@ -34,11 +34,10 @@ def test_path_resolver_status_file_rejects_reserved():
 def test_path_resolver_status_file_accepts_valid_job_id():
     """M-2: 規約に従う job_id は通過する (回帰防止)。"""
     resolver = job_manager.PathResolver("/work")
-    p = resolver.status_file(
-        "01997cdc-0000-7000-8000-000000000000", "opt__compound=0"
-    )
+    p = resolver.status_file("01997cdc-0000-7000-8000-000000000000", "opt__compound=0")
     assert "opt__compound=0" in str(p)
-    assert str(p).endswith(".status.toml")
+    # F2: status file lives under .jm/<JobId>/status.toml (no dot prefix)
+    assert str(p).endswith("/.jm/opt__compound=0/status.toml")
 
 
 def test_search_filter_construction_with_defaults():

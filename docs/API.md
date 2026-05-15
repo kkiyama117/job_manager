@@ -14,8 +14,9 @@ flow, lifecycle authority split, Pyclass Single Owner rule) see
 | Surface | Rust | Python |
 |---|---|---|
 | `FlowRun` aggregate (flow_uuid + JobFlow + ExperimentPlan + Option<CommonConfig>) | `flow::FlowRun` | `job_manager.FlowRun` |
+| Load `FlowRun` from `.jm/flow.effective.toml` (snapshot-driven; no `common.toml` needed) | `FlowRun::load_effective` | (used by `jm tick` / `jm show`) |
 | Topological order + cycle detection | `FlowRun::topological_order()` | (used by `submit_flow`) |
-| Render → submit → write `.status.toml` | `runner::FlowRunner::{submit, tick, render_only}` | `await job_manager.submit_flow(root, uuid, dry_run)` |
+| Render → submit → write `status.toml` | `runner::FlowRunner::{submit, tick, render_only}` | `await job_manager.submit_flow(root, uuid, dry_run)` |
 | SLURM submit abstraction (3 impls) | `slurm::executor::{Executor, SbatchExecutor, DryRunExecutor, MockExecutor}` | (internal) |
 | SLURM query abstraction (3 impls) | `slurm::querier::{Querier, SlurmQuerier, InMemoryQuerier, MockQuerier}` | (internal) |
 | State transition (pure) | `runner::transition::{decide_transition, Decision, TickResult}` | (internal) |
@@ -26,13 +27,14 @@ flow, lifecycle authority split, Pyclass Single Owner rule) see
 | Surface | Rust | Python |
 |---|---|---|
 | Path composition | `persistence::PathResolver` | `job_manager.PathResolver` |
-| `flow.toml` I/O | `persistence::flow::{read_flow, write_flow}` | `read_flow` / `write_flow` |
+| `flow.toml` I/O (partition default injected from `common.toml`) | `persistence::flow::{read_flow, write_flow}` | `read_flow` / `write_flow` |
+| `.jm/flow.effective.toml` I/O (materialized snapshot; no `common.toml` needed for reads) | `persistence::flow::{read_flow_effective, write_flow_effective}` | `read_flow_effective` / (write is Rust-only) |
 | `plan.toml` I/O | `persistence::plan::{read_plan, write_plan}` | `read_plan` / `write_plan` |
 | `common.toml` I/O | `persistence::common::{read_common, write_common}` | `read_common` / `write_common` |
-| `.status.toml` I/O | `persistence::job_run::{read_job_run, write_job_run}` | `read_job_run` / `write_job_run` |
+| `status.toml` I/O (under `.jm/<JobId>/`) | `persistence::job_run::{read_job_run, write_job_run}` | `read_job_run` / `write_job_run` |
 | `JobRun` data type | `job::{JobRun, Lifecycle}` | `JobRun` / `Lifecycle` |
 | `ExperimentPlan` data type | `plan::ExperimentPlan` | `ExperimentPlan` |
-| `CommonConfig` (defaults merge) | `persistence::merge_with_defaults` | (internal) |
+| `CommonConfig` (defaults merge) | `persistence::{merge_with_defaults, synth_empty_common}` | (internal) |
 
 ## Search / discovery
 
@@ -62,10 +64,11 @@ canonical pattern.
 
 | File | Schema | `deny_unknown_fields` |
 |---|---|---|
-| `flow.toml` | D2 `JobFlow` (jobs + edges) | upstream |
+| `flow.toml` | D2 `JobFlow` (jobs + edges; `partition` per job may be omitted and inherited from `common.toml`) | upstream |
+| `.jm/flow.effective.toml` | D2 `JobFlow` after defaulting is resolved (Cargo.lock analogue; safe to read without `common.toml`) | upstream |
 | `plan.toml` | `ExperimentPlan { jobs: BTreeMap<JobId, Table> }` | yes |
 | `common.toml` | D2 `CommonConfig` (SLURM resource defaults) | yes |
-| `.status.toml` | `JobRun { lifecycle, updated_at, slurm_jobid?, note?, slurm_status? }` | yes |
+| `.jm/<JobId>/status.toml` | `JobRun { lifecycle, updated_at, slurm_jobid?, note?, slurm_status? }` | yes |
 
 See [`architecture.md`](./architecture.md#statustoml-schema) for the
 full `.status.toml` example and the lifecycle authority split.

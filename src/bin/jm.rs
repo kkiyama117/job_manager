@@ -16,8 +16,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Render batch.bash only — no sbatch call.
-    Render { target: String },
+    /// Render batch.bash + .flow.effective.toml. With --effective-only the
+    /// batch.bash files are NOT touched, only the snapshot is refreshed.
+    Render {
+        target: String,
+        #[arg(long)]
+        effective_only: bool,
+    },
     /// Submit to SLURM (or DryRun).
     Submit {
         target: String,
@@ -39,9 +44,12 @@ enum Cmd {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Render { ref target } => {
+        Cmd::Render {
+            ref target,
+            effective_only,
+        } => {
             let root = resolve_root(&cli)?;
-            cmd_render(&root, target).await
+            cmd_render(&root, target, effective_only).await
         }
         Cmd::Submit {
             ref target,
@@ -92,9 +100,13 @@ fn parse_target(_root: &std::path::Path, target: &str) -> anyhow::Result<uuid::U
     uuid::Uuid::parse_str(target).map_err(|e| anyhow::anyhow!("invalid uuid: {e}"))
 }
 
-async fn cmd_render(root: &std::path::Path, target: &str) -> anyhow::Result<()> {
+async fn cmd_render(
+    root: &std::path::Path,
+    target: &str,
+    effective_only: bool,
+) -> anyhow::Result<()> {
     use job_manager::flow::FlowRun;
-    use job_manager::persistence::PathResolver;
+    use job_manager::persistence::{PathResolver, write_flow_effective};
     use job_manager::runner::flow::FlowRunner;
     use job_manager::slurm::executor::DryRunExecutor;
     use job_manager::slurm::querier::InMemoryQuerier;
@@ -103,6 +115,17 @@ async fn cmd_render(root: &std::path::Path, target: &str) -> anyhow::Result<()> 
     let resolver = PathResolver::new(root);
     let uuid = parse_target(root, target)?;
     let fr = FlowRun::read(&resolver, uuid)?;
+
+    if effective_only {
+        let path = resolver.flow_effective_toml(&uuid);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        write_flow_effective(&path, &fr.flow)?;
+        println!("updated .flow.effective.toml for {}", uuid);
+        return Ok(());
+    }
+
     let runner = FlowRunner::new(
         Box::new(DryRunExecutor),
         Box::new(InMemoryQuerier::new(HashMap::new())),
@@ -152,7 +175,7 @@ async fn cmd_show(root: &std::path::Path, target: &str) -> anyhow::Result<()> {
 
     let resolver = PathResolver::new(root);
     let uuid = parse_target(root, target)?;
-    let fr = FlowRun::read(&resolver, uuid)?;
+    let fr = FlowRun::load_effective(&resolver, uuid)?;
     println!("flow {} ({} jobs)", uuid, fr.flow.jobs.len());
     for jid in fr.flow.jobs.keys() {
         let p = resolver.status_file(&uuid, jid);
@@ -181,7 +204,7 @@ async fn cmd_tick(root: &std::path::Path, target: &str) -> anyhow::Result<()> {
 
     let resolver = PathResolver::new(root);
     let uuid = parse_target(root, target)?;
-    let fr = FlowRun::read(&resolver, uuid)?;
+    let fr = FlowRun::load_effective(&resolver, uuid)?;
     let manager = Arc::new(SlurmManager::default());
     let querier = SlurmQuerier::new(manager);
     let runner = FlowRunner::new(Box::new(DryRunExecutor), Box::new(querier), &resolver);
@@ -195,9 +218,19 @@ async fn cmd_tick(root: &std::path::Path, target: &str) -> anyhow::Result<()> {
 
 async fn cmd_search(root: &std::path::Path, program: Option<&str>) -> anyhow::Result<()> {
     use futures::StreamExt;
+    use job_manager::persistence::{PathResolver, read_common};
     use job_manager::walk::walk_flows;
+    use std::sync::Arc;
 
-    let s = walk_flows(root);
+    let resolver = PathResolver::new(root);
+    let common_path = resolver.common_toml();
+    let common = if common_path.exists() {
+        read_common(&common_path)?
+    } else {
+        job_manager::persistence::synth_empty_common()
+    };
+
+    let s = walk_flows(root, Arc::new(common));
     let mut s = std::pin::pin!(s);
     while let Some(item) = s.next().await {
         let flow = item?;

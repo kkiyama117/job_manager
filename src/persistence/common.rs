@@ -21,6 +21,32 @@ pub fn write_common(path: &Path, common: &CommonConfig) -> Result<(), JobManager
     super::atomic_write(path, text.as_bytes())
 }
 
+/// Build an empty `CommonConfig` with `partition=""` and a placeholder
+/// `project_root`. Used by call sites that need a CommonConfig but the user
+/// didn't supply a `common.toml` — `read_flow` then expects every job to
+/// carry its own `partition` (otherwise `PartitionMissing` surfaces).
+pub fn synth_empty_common() -> CommonConfig {
+    use gaussian_job_shared::config::common::DirectoryConfig;
+    CommonConfig {
+        slurm_default: SlurmJobConfig {
+            partition: String::new(),
+            time_limit: None,
+            log_stdout: None,
+            log_stderr: None,
+            comment: None,
+            job_name: None,
+            array_spec: None,
+            dependency: None,
+            mail_user: None,
+            mail_types: None,
+            resource_spec: None,
+        },
+        directories: DirectoryConfig {
+            project_root: std::path::PathBuf::from("."),
+        },
+    }
+}
+
 /// Merge `override_` on top of `common.slurm_default`.
 ///
 /// Partition is **not** filled from common here — `read_flow`'s TOML

@@ -85,12 +85,11 @@ impl PyJobRun {
 }
 
 pub(crate) fn read_job_run(path: PathBuf) -> PyResult<PyJobRun> {
-    let inner = job_run_io::read_job_run(&path)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let inner = job_run_io::read_job_run(&path)?;
     Ok(PyJobRun { inner })
 }
 
 pub(crate) fn write_job_run(path: PathBuf, run: PyJobRun) -> PyResult<()> {
-    job_run_io::write_job_run(&path, &run.inner)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    job_run_io::write_job_run(&path, &run.inner)?;
+    Ok(())
 }
