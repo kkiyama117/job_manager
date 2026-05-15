@@ -84,3 +84,5 @@ docs/_build/
 #
 uv.lock
 Cargo.lock
+
+.claude/worktrees
