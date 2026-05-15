@@ -47,12 +47,17 @@ examples/sweep/
 │       ├── flow.toml                               ← `opt__compound=1`'s body is `exit 1`
 │       └── plan.toml                               ← identical to inputs/.../plan.toml modulo uuid-tied refs
 │
-├── outputs/                                        ← success variant snapshot (batch.bash only — fill in .status.toml + slurm-*.out from a real run)
-│   └── 0199999a-0000-7000-8000-000000000000/<JobId>/batch.bash   × 7
+├── outputs/                                        ← success variant snapshot (batch.bash only — fill in status.toml + slurm-*.out from a real run)
+│   └── 0199999a-0000-7000-8000-000000000000/.jm/<JobId>/batch.bash   × 7
 │
 └── outputs-fail/                                   ← failure variant snapshot
-    └── 0199999a-0000-7000-8000-000000000001/<JobId>/batch.bash   × 7
+    └── 0199999a-0000-7000-8000-000000000001/.jm/<JobId>/batch.bash   × 7
 ```
+
+`.jm/` is the program-managed subdir job-manager writes under each
+`<flow_uuid>/`. After F2 (PR #17) the per-job artifacts (`batch.bash`,
+`status.toml`, `slurm-*.out/err`) live under `.jm/<JobId>/` rather
+than directly under `<flow_uuid>/<JobId>/`.
 
 Two separate roots (rather than one root with two flows) keep
 "success path" and "failure path" cleanly separable — `--root` points
@@ -65,7 +70,7 @@ come from `jm submit --dry-run` against the matching `inputs/` /
 `inputs-fail/` tree. The renderer is deterministic, so a dry-run on
 any host produces byte-identical scripts.
 
-`.status.toml` and `slurm-*.out` are **not** committed yet — those
+`status.toml` and `slurm-*.out` are **not** committed yet — those
 need a real cluster run. See "Run on real SLURM" below; the user
 typically commits a snapshot of both as a follow-up after running.
 
@@ -214,7 +219,7 @@ branches finish normally:
 
 #### Two non-obvious things about `Skipped`
 
-**`.status.toml` does not record which parent caused the skip.**
+**`status.toml` does not record which parent caused the skip.**
 `decide_transition` (`src/runner/transition.rs`) emits
 `Decision::SkipDueToParent { parent: JobId }`, but `FlowRunner::tick`
 maps that to `Lifecycle::Skipped` and writes a fresh `JobRun`
@@ -233,7 +238,7 @@ flips inside the same `tick` pass that recorded the parent's
 server-side once the parent exits non-zero — usually before any
 compute node allocates the child — so there's no stdout file to
 capture. `outputs-fail/<uuid>/freq__compound=1/` will have
-`batch.bash` (rendered at submit time) and `.status.toml`
+`batch.bash` (rendered at submit time) and `status.toml`
 (`lifecycle = "skipped"`), but no `slurm-*.out`.
 
 ## Common errors
