@@ -59,10 +59,11 @@ fn inject_partition_defaults(
 /// job lacks a partition and common has none either.
 pub fn read_flow(path: &Path, common: &CommonConfig) -> Result<JobFlow, JobManagerError> {
     let text = super::read_toml_string(path)?;
-    let mut v: toml::Value = toml::from_str(&text).map_err(|source| JobManagerError::TomlParse {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let mut v: toml::Value =
+        toml::from_str(&text).map_err(|source| JobManagerError::TomlParse {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let common_partition = if common.slurm_default.partition.is_empty() {
         None
     } else {
@@ -310,8 +311,14 @@ body = "true"
         )
         .unwrap();
         super::inject_partition_defaults(&mut v, Some("long")).unwrap();
-        assert_eq!(v["jobs"]["a"]["config"]["partition"].as_str().unwrap(), "short");
-        assert_eq!(v["jobs"]["b"]["config"]["partition"].as_str().unwrap(), "long");
+        assert_eq!(
+            v["jobs"]["a"]["config"]["partition"].as_str().unwrap(),
+            "short"
+        );
+        assert_eq!(
+            v["jobs"]["b"]["config"]["partition"].as_str().unwrap(),
+            "long"
+        );
     }
 
     #[test]
@@ -412,6 +419,9 @@ body = "true"
         let path = dir.path().join("flow.effective.toml");
         std::fs::write(&path, "this is = not = valid toml").unwrap();
         let err = read_flow_effective(&path).unwrap_err();
-        assert!(matches!(err, JobManagerError::TomlParse { .. }), "got {err:?}");
+        assert!(
+            matches!(err, JobManagerError::TomlParse { .. }),
+            "got {err:?}"
+        );
     }
 }

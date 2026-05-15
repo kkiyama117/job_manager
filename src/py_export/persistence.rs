@@ -19,7 +19,9 @@ use gaussian_job_shared::entities::workflow::JobFlow;
 /// Infer the `<root>` path from a `<root>/<flow_uuid>/flow.toml` path so we
 /// can locate `<root>/common.toml`. Returns RootInferenceFailed if the path
 /// is shorter than `<root>/<flow_uuid>/flow.toml`.
-pub(crate) fn infer_root_common(path: &std::path::Path) -> Result<std::path::PathBuf, JobManagerError> {
+pub(crate) fn infer_root_common(
+    path: &std::path::Path,
+) -> Result<std::path::PathBuf, JobManagerError> {
     path.parent()
         .and_then(|flow_dir| flow_dir.parent())
         .map(|root| root.join("common.toml"))

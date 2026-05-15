@@ -6,9 +6,9 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use crate::persistence::flow::read_flow;
 use crate::persistence::job_run::read_job_run;
-use crate::py_export::persistence::load_or_synth_common;
 use crate::persistence::path::PathResolver;
 use crate::py_export::path::PyPathResolver;
+use crate::py_export::persistence::load_or_synth_common;
 use crate::view::CalcView;
 
 #[gen_stub_pyclass]

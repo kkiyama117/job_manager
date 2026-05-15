@@ -78,9 +78,8 @@ impl FlowRun {
         flow_uuid: uuid::Uuid,
     ) -> Result<Self, JobManagerError> {
         let plan = crate::persistence::read_plan(&resolver.plan_toml(&flow_uuid))?;
-        let flow = crate::persistence::read_flow_effective(
-            &resolver.flow_effective_toml(&flow_uuid),
-        )?;
+        let flow =
+            crate::persistence::read_flow_effective(&resolver.flow_effective_toml(&flow_uuid))?;
         Ok(Self {
             flow_uuid,
             flow,

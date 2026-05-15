@@ -103,7 +103,9 @@ pub enum JobManagerError {
     )]
     SnapshotMissing { path: PathBuf, uuid: String },
 
-    #[error("cannot infer root from flow.toml path {path}: expected <root>/<flow_uuid>/flow.toml layout")]
+    #[error(
+        "cannot infer root from flow.toml path {path}: expected <root>/<flow_uuid>/flow.toml layout"
+    )]
     RootInferenceFailed { path: PathBuf },
 
     #[error("{0}")]
@@ -173,8 +175,14 @@ mod tests {
             uuid: "01999999-0000-7000-8000-000000000000".to_string(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("/work/abc/.jm/flow.effective.toml"), "msg = {msg}");
-        assert!(msg.contains("jm render"), "msg should hint at render: {msg}");
+        assert!(
+            msg.contains("/work/abc/.jm/flow.effective.toml"),
+            "msg = {msg}"
+        );
+        assert!(
+            msg.contains("jm render"),
+            "msg should hint at render: {msg}"
+        );
     }
 
     #[test]
