@@ -100,32 +100,42 @@ formatting survive — Rust's TOML serializer would strip both. It
 still runs `read_flow` / `read_plan` round-trip to catch any TOML
 syntax error.
 
-## Reproduce the dry-run locally
+## Regenerate `outputs/` from `inputs/`
 
-No SLURM needed. From the repo root:
-
-```bash
-# Build the CLI without pyo3 (one-time — see examples/simple/README for why)
-cargo build --bin jm --no-default-features
-
-UUID=0199999a-0000-7000-8000-000000000000
-./target/debug/jm --root examples/sweep/inputs submit "$UUID" --dry-run
-# → submitted 0 jobs   (DryRunExecutor returns an empty result map)
-
-# Compare against the committed outputs
-diff -r \
-    <(find examples/sweep/inputs/$UUID -name batch.bash | sort | xargs cat) \
-    <(find examples/sweep/outputs/$UUID -name batch.bash | sort | xargs cat)
-```
-
-Dry-run writes `batch.bash` into the **inputs** tree (because
-`PathResolver` keys everything off `--root`). After comparing, move
-them to `outputs/` or clean them up:
+After editing anything under `inputs/` or `inputs-fail/` — or after a
+renderer change in the crate — the committed snapshot under
+`outputs/` / `outputs-fail/` must be regenerated so the two stay in
+lock-step. Use the script:
 
 ```bash
-find examples/sweep/inputs -name batch.bash -delete
-find examples/sweep/inputs -type d -empty -delete
+bash examples/sweep/regenerate_outputs.sh
+git diff --stat examples/sweep/outputs examples/sweep/outputs-fail
 ```
+
+What the script does (read it — it's ~30 lines of bash):
+
+1. `cd`s to the git repo root (so it works from anywhere)
+2. Builds `jm` with `--no-default-features` if `./target/debug/jm` is
+   missing
+3. Wipes `outputs/<UUID>/.jm/` and `outputs-fail/<UUID>/.jm/`
+4. **Stages** `common.toml` + `flow.toml` + `plan.toml` *into*
+   `outputs/<UUID>/`, runs `jm render` against `--root
+   examples/sweep/outputs`, then deletes the stage — leaving only
+   `.jm/` behind. This avoids rendering INTO `inputs/`, which is what
+   produced the c5d6efc "fucking mistake" commit (auto-generated
+   artifacts leaking next to user-authored TOMLs). `inputs/<UUID>/`
+   carries a per-flow `.gitignore` containing `.jm/` to keep any
+   accidental in-tree render from staining git status either.
+5. Asserts `outputs/<UUID>/.jm/` actually exists post-render (loud
+   failure if `jm` exit=0 but wrote nothing visible — catches stale
+   binaries and `--root` canonicalization surprises on unfamiliar
+   filesystems)
+
+The script is **idempotent**: with no `inputs/` change, `git diff` is
+empty. Any diff means something real changed — review before staging.
+
+`status.toml` and `slurm-*.out/err` are not produced (real SLURM
+needed). Commit those separately after an actual cluster run.
 
 A rendered `opt__compound=0/batch.bash` looks like:
 
