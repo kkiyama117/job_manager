@@ -25,7 +25,8 @@ program = "echo"
 body    = "echo \"[opt] flow=$JM_FLOW_UUID job=$JM_JOB_ID\"\nsleep 2\n"
 
 [jobs.opt.config]
-partition = "REPLACE_ME"   # ← merge_with_defaults takes this over common.toml when non-empty; rewrite both before submit
+# partition は common.toml の [slurm_default] から自動で補完される。
+# 個別に上書きしたい場合のみここで partition = "..." を指定。
 
 # --- child step: depends on `opt` finishing with exit 0 ---
 [jobs.freq]
@@ -37,4 +38,5 @@ from = "opt"
 kind = "afterok"
 
 [jobs.freq.config]
-partition = "REPLACE_ME"   # ← merge_with_defaults takes this over common.toml when non-empty; rewrite both before submit
+# partition は common.toml の [slurm_default] から自動で補完される。
+# 個別に上書きしたい場合のみここで partition = "..." を指定。
