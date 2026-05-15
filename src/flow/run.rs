@@ -11,6 +11,7 @@ use crate::flow::topology;
 use crate::persistence::common::merge_with_defaults;
 use crate::plan::ExperimentPlan;
 
+#[derive(Debug)]
 pub struct FlowRun {
     pub flow_uuid: uuid::Uuid,
     pub flow: JobFlow,
@@ -66,6 +67,25 @@ impl FlowRun {
             flow,
             plan,
             common,
+        })
+    }
+
+    /// Load FlowRun from a materialized snapshot — used by tick/show paths
+    /// that don't need `common.toml`. The `.flow.effective.toml` snapshot
+    /// has every default already resolved.
+    pub fn load_effective(
+        resolver: &crate::persistence::PathResolver,
+        flow_uuid: uuid::Uuid,
+    ) -> Result<Self, JobManagerError> {
+        let plan = crate::persistence::read_plan(&resolver.plan_toml(&flow_uuid))?;
+        let flow = crate::persistence::read_flow_effective(
+            &resolver.flow_effective_toml(&flow_uuid),
+        )?;
+        Ok(Self {
+            flow_uuid,
+            flow,
+            plan,
+            common: None,
         })
     }
 
@@ -263,5 +283,39 @@ mod tests {
 
         let fr = FlowRun::read(&resolver, uuid).unwrap();
         assert!(fr.common.is_none());
+    }
+
+    #[test]
+    fn load_effective_returns_snapshot_missing_when_absent() {
+        use crate::persistence::{PathResolver, write_plan};
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let resolver = PathResolver::new(dir.path());
+        let fr_src = fr_with_2_jobs();
+        let uuid = uuid::Uuid::nil();
+
+        write_plan(&resolver.plan_toml(&uuid), &fr_src.plan).unwrap();
+        // Do NOT write flow_effective snapshot
+
+        let err = FlowRun::load_effective(&resolver, uuid).unwrap_err();
+        assert!(matches!(err, JobManagerError::SnapshotMissing { .. }));
+    }
+
+    #[test]
+    fn load_effective_reads_snapshot_without_common() {
+        use crate::persistence::{PathResolver, write_flow_effective, write_plan};
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let resolver = PathResolver::new(dir.path());
+        let fr_src = fr_with_2_jobs();
+        let uuid = uuid::Uuid::nil();
+
+        write_flow_effective(&resolver.flow_effective_toml(&uuid), &fr_src.flow).unwrap();
+        write_plan(&resolver.plan_toml(&uuid), &fr_src.plan).unwrap();
+
+        let fr = FlowRun::load_effective(&resolver, uuid).unwrap();
+        assert_eq!(fr.flow_uuid, uuid);
+        assert!(fr.common.is_none(), "load_effective never reads common");
+        assert_eq!(fr.flow.jobs.len(), 2);
     }
 }
