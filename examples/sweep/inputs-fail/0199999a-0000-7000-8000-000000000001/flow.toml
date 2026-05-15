@@ -1,4 +1,4 @@
-# JobFlow — sweep + fan-out DAG.
+# JobFlow — sweep + fan-out DAG (failure variant).
 #
 # Shape (7 nodes, 6 afterok edges):
 #
@@ -20,11 +20,16 @@
 # renders as `compound=` — that's intentional, to show the export is
 # always defined.
 #
-# Per-job `[jobs.X.config].partition = "REPLACE_ME"` exists so
-# `merge_with_defaults` exercises the per-job override path (non-empty
-# wins over common.toml). Rewrite both the per-job and common-level
-# partitions before submit, or sbatch will reject "invalid partition
-# specified: REPLACE_ME".
+# `partition` は flow.toml には書かず、`common.toml [slurm_default]` から
+# `read_flow` 段で TOML preparse 経由で自動 inject される (F2 partition
+# defaulting; cf. examples/simple)。個別ジョブで上書きしたい場合のみ
+# `[jobs.X.config].partition = "..."` を明示する。実 partition への置換は
+# 共通の `common.toml` 側だけで済む。
+#
+# Failure variant: `opt__compound=1` の `body` を `exit 1` に差し替えて
+# Skipped propagation を `freq__compound=1` に伝播させる。他 2 枝
+# (compound=0,2) は最後まで成功するので Skipped が culprit を保持する
+# こと、afterok の局所性、が同時に観察できる。
 
 uuid       = "0199999a-0000-7000-8000-000000000001"
 created_at = "2026-05-15T00:00:00Z"
@@ -39,7 +44,8 @@ program = "echo"
 body    = "echo \"[$JM_JOB_ID] flow=$JM_FLOW_UUID compound=$JM_PARAM_COMPOUND_NAME route=$JM_PARAM_ROUTE\"\nsleep 2\n"
 
 [jobs.prep.config]
-partition = "REPLACE_ME"   # ← merge_with_defaults takes this over common.toml when non-empty; rewrite both before submit
+# partition は common.toml の [slurm_default] から自動で補完される。
+# 個別に上書きしたい場合のみここで partition = "..." を指定。
 
 # --- opt branches (3-way fan-out from prep) ---
 [jobs."opt__compound=0"]
@@ -51,7 +57,8 @@ from = "prep"
 kind = "afterok"
 
 [jobs."opt__compound=0".config]
-partition = "REPLACE_ME"
+# partition は common.toml の [slurm_default] から自動で補完される。
+# 個別に上書きしたい場合のみここで partition = "..." を指定。
 
 [jobs."opt__compound=1"]
 program = "echo"
@@ -65,7 +72,8 @@ from = "prep"
 kind = "afterok"
 
 [jobs."opt__compound=1".config]
-partition = "REPLACE_ME"
+# partition は common.toml の [slurm_default] から自動で補完される。
+# 個別に上書きしたい場合のみここで partition = "..." を指定。
 
 [jobs."opt__compound=2"]
 program = "echo"
@@ -76,7 +84,8 @@ from = "prep"
 kind = "afterok"
 
 [jobs."opt__compound=2".config]
-partition = "REPLACE_ME"
+# partition は common.toml の [slurm_default] から自動で補完される。
+# 個別に上書きしたい場合のみここで partition = "..." を指定。
 
 # --- freq branches (one linear afterok per opt) ---
 [jobs."freq__compound=0"]
@@ -88,7 +97,8 @@ from = "opt__compound=0"
 kind = "afterok"
 
 [jobs."freq__compound=0".config]
-partition = "REPLACE_ME"
+# partition は common.toml の [slurm_default] から自動で補完される。
+# 個別に上書きしたい場合のみここで partition = "..." を指定。
 
 [jobs."freq__compound=1"]
 program = "echo"
@@ -99,7 +109,8 @@ from = "opt__compound=1"
 kind = "afterok"
 
 [jobs."freq__compound=1".config]
-partition = "REPLACE_ME"
+# partition は common.toml の [slurm_default] から自動で補完される。
+# 個別に上書きしたい場合のみここで partition = "..." を指定。
 
 [jobs."freq__compound=2"]
 program = "echo"
@@ -110,4 +121,5 @@ from = "opt__compound=2"
 kind = "afterok"
 
 [jobs."freq__compound=2".config]
-partition = "REPLACE_ME"
+# partition は common.toml の [slurm_default] から自動で補完される。
+# 個別に上書きしたい場合のみここで partition = "..." を指定。

@@ -153,13 +153,16 @@ an axis export. `JM_PARAM_*` come from `plan.toml`.
 
 ## Run on real SLURM
 
-Same procedure as `examples/simple` — `REPLACE_ME` sentinels in
-`common.toml` and every per-job `[jobs.X.config].partition` must be
-rewritten. See [`examples/simple/README.md`](../simple/README.md#run-on-real-slurm)
+Same procedure as `examples/simple`. After F2 (PR #17) `flow.toml` no
+longer carries per-job `partition` — the value flows in from
+`common.toml [slurm_default].partition` at `read_flow` time via
+TOML preparse. The only `REPLACE_ME` sentinels you need to rewrite
+are in `common.toml` (the `partition` field and `project_root`).
+See [`examples/simple/README.md`](../simple/README.md#run-on-real-slurm)
 for the full step-by-step (the only differences here are: `UUID` is
 `0199999a-...000` for the success variant or `...001` for the
-failure variant, and there are 7 per-job partitions to rewrite
-instead of 2).
+failure variant; everything else, including the one-line sed, is
+identical).
 
 The sed steps adapt directly:
 
@@ -176,7 +179,7 @@ cp examples/sweep/inputs/$UUID/flow.toml      "$ROOT/$UUID/flow.toml"
 cp examples/sweep/inputs/$UUID/plan.toml      "$ROOT/$UUID/plan.toml"
 
 sed -i "s|^partition[[:space:]]*=.*|partition = \"$PART\"|" \
-    "$ROOT/common.toml" "$ROOT/$UUID/flow.toml"
+    "$ROOT/common.toml"
 sed -i "s|^project_root[[:space:]]*=.*|project_root = \"$ROOT/scratch\"|" \
     "$ROOT/common.toml"
 
