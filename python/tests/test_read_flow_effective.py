@@ -1,14 +1,25 @@
-"""Smoke test: roundtrip via write_flow_effective ↔ read_flow_effective."""
+"""Smoke test: read_flow → write_flow ↔ read_flow_effective via in-process API.
+
+Exercises the Python binding surface end-to-end without invoking the `jm`
+CLI. The full `jm render --effective-only` path is already covered by
+Rust integration tests (`tests/integration_sp3.rs`, `tests/cli_smoke.rs`)
+and the `write_flow_effective ↔ read_flow_effective` byte-level
+round-trip is covered in `src/persistence/flow.rs`, so the Python side
+only needs to verify the binding wiring and on-disk layout assumptions.
+
+Keeping this Python-only also lets `pytest` pass against a pre-built
+wheel without a Rust toolchain (e.g., a wheel pulled from PyPI), which
+was not possible while this test shelled out to `cargo run`.
+"""
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import job_manager
 
 
-def test_read_flow_effective_after_render(tmp_path: Path) -> None:
+def test_read_flow_effective_roundtrip(tmp_path: Path) -> None:
     uuid = "01999999-0000-7000-8000-000000000000"
 
     common_toml = """
@@ -38,32 +49,25 @@ body = "true\\n"
 """
     (flow_dir / "plan.toml").write_text(plan_toml.strip() + "\n")
 
-    repo_root = Path(__file__).resolve().parents[2]
-    cmd = [
-        "cargo",
-        "run",
-        "--bin",
-        "jm",
-        "--no-default-features",
-        "--quiet",
-        "--",
-        "--root",
-        str(tmp_path),
-        "render",
-        uuid,
-        "--effective-only",
-    ]
-    # 5 min — first invocation rebuilds the jm binary; later runs hit the
-    # build cache and finish in seconds. Surface a timeout as a clear test
-    # failure rather than a hung CI job.
-    r = subprocess.run(
-        cmd, cwd=repo_root, capture_output=True, text=True, timeout=300
+    # 1. read_flow infers <root>/common.toml and bakes its partition into
+    #    the materialized body.
+    body = job_manager.read_flow(str(flow_dir / "flow.toml"))
+    assert uuid in body, f"uuid not preserved by read_flow: {body}"
+    assert 'partition = "long"' in body, (
+        f"expected default partition baked in by read_flow: {body}"
     )
-    assert r.returncode == 0, f"jm render failed: stderr={r.stderr}"
 
+    # 2. Persist the materialized body where `jm render --effective-only`
+    #    would emit it. write_flow uses the same atomic-rename path as
+    #    write_flow_effective, so the on-disk bytes are equivalent.
     eff_path = flow_dir / ".jm" / "flow.effective.toml"
+    job_manager.write_flow(str(eff_path), body)
     assert eff_path.exists(), f"snapshot not written at {eff_path}"
 
-    body = job_manager.read_flow_effective(str(eff_path))
-    assert uuid in body
-    assert 'partition = "long"' in body, f"expected default partition baked in: {body}"
+    # 3. read_flow_effective reads the snapshot without needing
+    #    common.toml again — every default must already be baked in.
+    snapshot = job_manager.read_flow_effective(str(eff_path))
+    assert uuid in snapshot, f"uuid lost on effective roundtrip: {snapshot}"
+    assert 'partition = "long"' in snapshot, (
+        f"partition lost on effective roundtrip: {snapshot}"
+    )
