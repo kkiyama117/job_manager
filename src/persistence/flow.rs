@@ -89,13 +89,19 @@ pub fn write_flow(path: &Path, flow: &JobFlow) -> Result<(), JobManagerError> {
 /// caller at `jm render <uuid>`.
 pub fn read_flow_effective(path: &Path) -> Result<JobFlow, JobManagerError> {
     if !path.exists() {
+        // Expected layout is `<root>/<uuid>/.jm/flow.effective.toml`, so the
+        // grandparent's basename is the uuid. When the path doesn't match
+        // that shape (e.g., a direct test fixture), surface a clear marker
+        // instead of a plain "<unknown>" that could be mistaken for a bug.
         let uuid_hint = path
             .parent()
             .and_then(|p| p.parent())
             .and_then(|p| p.file_name())
             .and_then(|s| s.to_str())
-            .unwrap_or("<unknown>")
-            .to_string();
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                "<path layout outside <root>/<uuid>/.jm/flow.effective.toml>".to_string()
+            });
         return Err(JobManagerError::SnapshotMissing {
             path: path.to_path_buf(),
             uuid: uuid_hint,
