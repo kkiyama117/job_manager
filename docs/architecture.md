@@ -129,26 +129,33 @@ free of I/O imports.
 `PathResolver` is the single source of truth for path composition:
 
 ```
-<root>/                          <- PathResolver.root()
-├── common.toml                  <- PathResolver.common_toml()    (optional)
-└── <flow_uuid>/                 <- PathResolver.flow_dir(&uuid)
-    ├── flow.toml                <- PathResolver.flow_toml(&uuid) (D2 JobFlow)
-    ├── plan.toml                <- PathResolver.plan_toml(&uuid) (ExperimentPlan)
-    └── <JobId>/                 <- per-Job folder
-        ├── batch.bash           <- PathResolver.batch_bash(&uuid, &jid)
-        ├── input.gjf            <- user / grammar layer (out of scope)
-        ├── slurm-<id>.out       <- SLURM stdout
-        ├── slurm-<id>.err       <- SLURM stderr
-        └── .status.toml         <- PathResolver.status_file(&uuid, &jid)
+<root>/                              <- PathResolver.root()
+├── common.toml                      <- PathResolver.common_toml()    (optional)
+└── <flow_uuid>/                     <- PathResolver.flow_dir(&uuid)
+    ├── flow.toml                    <- PathResolver.flow_toml(&uuid)  (D2 JobFlow; user input)
+    ├── plan.toml                    <- PathResolver.plan_toml(&uuid)  (ExperimentPlan; user input)
+    └── .jm/                         <- program-managed subtree (suitable for per-flow .gitignore)
+        ├── flow.effective.toml      <- PathResolver.flow_effective_toml(&uuid)
+        └── <JobId>/                 <- per-Job folder
+            ├── batch.bash           <- PathResolver.batch_bash(&uuid, &jid)
+            ├── input.gjf            <- user / grammar layer (out of scope)
+            ├── slurm-<id>.out       <- SLURM stdout
+            ├── slurm-<id>.err       <- SLURM stderr
+            └── status.toml          <- PathResolver.status_file(&uuid, &jid)
 ```
 
 `common.toml` lives at the **root** level (one per root, shared across
 all flows). Per-flow common.toml is not supported.
 
+`flow.toml` and `plan.toml` are **read-only user input** from
+job-manager's perspective; everything the program writes goes under
+`.jm/`. This split is what makes per-flow `.gitignore` containing just
+`.jm/` a clean separator between committed inputs and program output.
+
 Status is **not** stored inside `JobFlow` so the D2 schema stays
-unchanged. The dot-prefix on `.status.toml` keeps it from colliding with
-SLURM outputs (`slurm-*.out`) and user files. `CalcView::files()` filters
-dot-prefixed entries.
+unchanged. `CalcView::files()` filters dot-prefixed entries so the
+`.jm/` subdir and any other `.*` files don't surface in the per-Job
+file listing.
 
 All TOML writes go through an atomic-rename helper with a
 **PID-suffixed tmp file** (`<name>.<pid>.tmp`) so two processes can
@@ -168,8 +175,8 @@ Re-exported from `lib.rs`:
 | `FlowRunner` / `Decision` / `TickResult` / `decide_transition` | runner | `runner` |
 | `Executor` / `SbatchExecutor` / `DryRunExecutor` / `MockExecutor` | trait + impls | `slurm::executor` |
 | `Querier` / `SlurmQuerier` / `InMemoryQuerier` | trait + impls | `slurm` |
-| `PathResolver` / `merge_with_defaults` | struct / fn | `persistence` |
-| `read_flow` / `write_flow` / `read_plan` / `write_plan` / `read_common` / `write_common` / `read_job_run` / `write_job_run` | fn | `persistence::*` |
+| `PathResolver` / `merge_with_defaults` / `synth_empty_common` | struct / fn | `persistence` |
+| `read_flow` / `write_flow` / `read_flow_effective` / `write_flow_effective` / `read_plan` / `write_plan` / `read_common` / `write_common` / `read_job_run` / `write_job_run` | fn | `persistence::*` |
 | `ExperimentPlan` | struct | `plan` |
 | `render_batch_bash` | fn | `render` |
 | `walk_flows` | fn → `Stream<Item=Result<JobFlow>>` | `walk` |

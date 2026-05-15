@@ -14,6 +14,8 @@
 | `superpowers/plans/2026-05-12-job-manager-sp2.md` | SP-2 TDD implementation plan |
 | `superpowers/plans/2026-05-13-job-manager-sp3.md` | SP-3 v1 implementation plan (superseded) |
 | `superpowers/plans/2026-05-13-job-manager-sp3-rearch.md` | **SP-3 v2 implementation plan (current)** |
+| `superpowers/specs/2026-05-15-common-env-defaulting-design.md` | F2 design spec — `common.toml` partition defaulting + `.jm/` program-managed subdir + `.flow.effective.toml` snapshot |
+| `superpowers/plans/2026-05-15-common-env-defaulting.md` | F2 implementation plan |
 
 For a one-page overview of capabilities, the `jm` CLI, and the Python
 async API, see the top-level [`../README.md`](../README.md).
