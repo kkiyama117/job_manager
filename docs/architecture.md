@@ -396,6 +396,26 @@ crates can write deterministic tests without a live SLURM cluster.
 test suite of 100+ tests exercises submit, tick, render, search, and
 all transition rules.
 
+## common.toml as Pool template (Airflow / Prefect mapping)
+
+| job-manager | Airflow | Prefect |
+|---|---|---|
+| `common.toml [slurm_default]` | DAG `default_args` | Work Pool `base_job_template` + variables |
+| `flow.toml [jobs.*.config]` | Operator kwargs (partial) | Deployment variables (per-task override) |
+| `read_flow(path, &common)` | `apply_defaults` + DAG load | template render |
+| `.flow.effective.toml` | (not保存される) | Deployment spec (Cargo.lock 相当) |
+
+`flow.toml` の `partition` を省略すると `common.toml` の値が `read_flow` 段で TOML
+preparse によって inject される。これは Airflow の `default_args` 継承、Prefect の
+template render と同型の機構。
+
+## `.flow.effective.toml` — materialized snapshot
+
+`<flow_uuid>/.jm/flow.effective.toml` は `jm submit` / `jm render` 時に書かれる
+materialized snapshot で、Cargo.lock パターンに対応する。`flow.toml` (partial input)
+→ `.flow.effective.toml` (full spec) は一方向変換。`tick` / `show` はこの snapshot
+を読み、`common.toml` は不要。
+
 ## Deferred to future work
 
 Not implemented here (see GitHub issue #13 for the deferred review
