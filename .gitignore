@@ -86,6 +86,8 @@ docs/_build/
 # Pyenv
 .python-version
 
-#
+# uv.lock is intentionally untracked: this is an application/library
+# distributed via PyPI (sdist + wheels), so downstream consumers resolve
+# their own dependency tree. Tracking would only add merge friction.
 uv.lock
 Cargo.lock

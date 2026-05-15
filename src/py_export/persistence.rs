@@ -38,6 +38,13 @@ pub(crate) fn load_or_synth_common(flow_toml_path: &std::path::Path) -> PyResult
     if common_path.exists() {
         Ok(inner_read_common(&common_path)?)
     } else {
+        // Surface the fallback so users who *intended* to provide a common.toml
+        // can spot a missing/misplaced file before hitting a PartitionMissing
+        // later. INFO (not WARN) because the fallback is a documented mode.
+        tracing::info!(
+            common_path = %common_path.display(),
+            "common.toml not found; falling back to synth_empty_common (every job must carry its own partition)"
+        );
         Ok(crate::persistence::synth_empty_common())
     }
 }

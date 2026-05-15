@@ -98,11 +98,12 @@ async fn atomic_write_batch_bash(
         if let Err(e) =
             tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await
         {
-            eprintln!(
-                "warning: chmod 0600 failed on {} ({e}); continuing with default permissions. \
-                 If the filesystem cannot represent Unix permissions this is expected. \
-                 The script may be readable by other users on this host.",
-                tmp.display()
+            tracing::warn!(
+                path = %tmp.display(),
+                error = %e,
+                "chmod 0600 failed; continuing with default permissions \
+                 (the rendered script may be readable by other users on this host). \
+                 If the filesystem cannot represent Unix permissions this is expected."
             );
         }
     }
@@ -168,7 +169,10 @@ impl<'r> FlowRunner<'r> {
             move || crate::persistence::write_flow_effective(&path, &flow)
         })
         .await
-        .map_err(|e| JobManagerError::Other(format!("write_flow_effective join: {e}")))??;
+        .map_err(|source| JobManagerError::JoinFailed {
+            op: "write_flow_effective",
+            source,
+        })??;
 
         let mut submitted: BTreeMap<JobId, u64> = BTreeMap::new();
 

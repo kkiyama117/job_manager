@@ -48,6 +48,13 @@ clap = { version = "4.6", features = ["derive"] }
 # their `pyo3` feature so this crate's cdylib does not duplicate pyclass
 # registrations.
 
+# Do NOT pin `rev` here. D2 (gaussian_job_shared) references
+# slurm-async-runner by the same URL without a `rev`; pinning a `rev` on
+# the direct reference makes cargo treat the two as distinct source
+# entries, duplicating `SlurmJobConfig` / `JobStatus` and silently
+# breaking the Pyclass Single Owner rule. Cargo.lock (committed) is the
+# canonical pin: to bump, run `cargo update -p <crate>` and commit
+# Cargo.lock in the same change. See CLAUDE.md "Upstream crates".
 gaussian_job_shared = { git = "https://github.com/kkiyama117/gaussian_job_shared.git", default-features = false }
 slurm_async_runner = { git = "https://github.com/kkiyama117/slurm-async-runner.git", default-features = false }
 
@@ -81,7 +88,7 @@ pythonize = { version = "0.28", optional = true }
 # Pinned to kkiyama117/pyo3-stub-gen which carries the
 # `#[gen_stub(awaitable)]` patch (upstream issue #326). Bump back to the
 # upstream Jij-Inc rev once the PR is merged and released.
-pyo3-stub-gen = { git = "https://github.com/kkiyama117/pyo3-stub-gen", default-features = false, features = [
+pyo3-stub-gen = { git = "https://github.com/kkiyama117/pyo3-stub-gen", rev = "a56406cb01ed9b0d0322bec59489e7017acb371b", default-features = false, features = [
   "infer_signature",
 ], optional = true }
 

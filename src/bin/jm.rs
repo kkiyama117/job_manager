@@ -227,6 +227,10 @@ async fn cmd_search(root: &std::path::Path, program: Option<&str>) -> anyhow::Re
     let common = if common_path.exists() {
         read_common(&common_path)?
     } else {
+        tracing::info!(
+            common_path = %common_path.display(),
+            "common.toml not found under root; falling back to synth_empty_common for jm search"
+        );
         job_manager::persistence::synth_empty_common()
     };
 

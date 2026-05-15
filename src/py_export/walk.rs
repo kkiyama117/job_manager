@@ -21,6 +21,10 @@ pub fn walk_flows<'py>(py: Python<'py>, root: PathBuf) -> PyResult<Bound<'py, Py
     let common = if common_path.exists() {
         crate::persistence::read_common(&common_path)?
     } else {
+        tracing::info!(
+            common_path = %common_path.display(),
+            "common.toml not found under root; falling back to synth_empty_common for walk_flows"
+        );
         crate::persistence::synth_empty_common()
     };
     let common = Arc::new(common);
