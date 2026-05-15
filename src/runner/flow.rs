@@ -442,4 +442,104 @@ mod tests {
         let snap = resolver.flow_effective_toml(&fr.flow_uuid);
         assert!(snap.exists(), "snapshot not written at {}", snap.display());
     }
+
+    #[tokio::test]
+    async fn tick_works_on_load_effective_fr() {
+        use crate::flow::FlowRun;
+        use crate::persistence::{PathResolver, write_flow_effective, write_plan};
+
+        let dir = tempdir().unwrap();
+        let resolver = PathResolver::new(dir.path());
+
+        // Create a source FlowRun with 2 jobs and a partition
+        let flow_uuid = uuid::Uuid::new_v4();
+        let job_id_1 = JobId("job1".to_string());
+        let job_id_2 = JobId("job2".to_string());
+
+        let mut jobs: BTreeMap<JobId, Job> = BTreeMap::new();
+        jobs.insert(
+            job_id_1.clone(),
+            Job {
+                spec: JobSpec {
+                    program: Program("dummy".to_string()),
+                    body: "echo one".to_string(),
+                    config: SlurmJobConfig {
+                        partition: "long".to_string(),
+                        time_limit: None,
+                        log_stdout: None,
+                        log_stderr: None,
+                        comment: None,
+                        job_name: None,
+                        array_spec: None,
+                        dependency: None,
+                        mail_user: None,
+                        mail_types: None,
+                        resource_spec: None,
+                    },
+                },
+                parents: vec![],
+            },
+        );
+        jobs.insert(
+            job_id_2.clone(),
+            Job {
+                spec: JobSpec {
+                    program: Program("dummy".to_string()),
+                    body: "echo two".to_string(),
+                    config: SlurmJobConfig {
+                        partition: "long".to_string(),
+                        time_limit: None,
+                        log_stdout: None,
+                        log_stderr: None,
+                        comment: None,
+                        job_name: None,
+                        array_spec: None,
+                        dependency: None,
+                        mail_user: None,
+                        mail_types: None,
+                        resource_spec: None,
+                    },
+                },
+                parents: vec![],
+            },
+        );
+
+        let flow = JobFlow {
+            uuid: flow_uuid,
+            created_at: chrono::Utc::now(),
+            tags: BTreeMap::new(),
+            jobs,
+        };
+
+        let mut plan_jobs: BTreeMap<JobId, BTreeMap<String, toml::Value>> = BTreeMap::new();
+        plan_jobs.insert(job_id_1, BTreeMap::new());
+        plan_jobs.insert(job_id_2, BTreeMap::new());
+
+        let plan = crate::plan::ExperimentPlan { jobs: plan_jobs };
+
+        let fr_src = FlowRun {
+            flow_uuid,
+            flow,
+            plan,
+            common: None,
+        };
+
+        // Write snapshot files
+        write_flow_effective(&resolver.flow_effective_toml(&flow_uuid), &fr_src.flow).unwrap();
+        write_plan(&resolver.plan_toml(&flow_uuid), &fr_src.plan).unwrap();
+
+        // Load from snapshot
+        let fr = FlowRun::load_effective(&resolver, flow_uuid).unwrap();
+
+        // Create runner with mock executor and querier
+        let runner = FlowRunner::new(
+            Box::new(MockExecutor::new(vec![])),
+            Box::new(InMemoryQuerier::new(HashMap::new())),
+            &resolver,
+        );
+
+        // Tick should succeed; no status files exist yet, so transitions should be empty
+        let result = runner.tick(&fr).await.unwrap();
+        assert!(result.transitions.is_empty());
+    }
 }
