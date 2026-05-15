@@ -82,6 +82,38 @@ pub fn write_flow(path: &Path, flow: &JobFlow) -> Result<(), JobManagerError> {
     super::atomic_write(path, body.as_bytes())
 }
 
+/// Read a materialized snapshot. Unlike `read_flow`, this does not need a
+/// `CommonConfig` — the snapshot has every default already baked in. If
+/// the file is absent, returns `SnapshotMissing` with a hint pointing the
+/// caller at `jm render <uuid>`.
+pub fn read_flow_effective(path: &Path) -> Result<JobFlow, JobManagerError> {
+    if !path.exists() {
+        let uuid_hint = path
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .unwrap_or("<unknown>")
+            .to_string();
+        return Err(JobManagerError::SnapshotMissing {
+            path: path.to_path_buf(),
+            uuid: uuid_hint,
+        });
+    }
+    let text = super::read_toml_string(path)?;
+    toml::from_str(&text).map_err(|source| JobManagerError::TomlParse {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Write a materialized snapshot atomically. Creates `<flow_dir>/.jm/`
+/// (and intermediate dirs) if missing.
+pub fn write_flow_effective(path: &Path, flow: &JobFlow) -> Result<(), JobManagerError> {
+    let body = toml::to_string_pretty(flow)?;
+    super::atomic_write(path, body.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +380,38 @@ body = "true"
         assert!(result.is_err());
         let leaks = lingering_tmp_files(dir.path());
         assert!(leaks.is_empty(), "tmp files leaked: {leaks:?}");
+    }
+
+    #[test]
+    fn write_then_read_effective_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("flow.effective.toml");
+        let original = sample_flow();
+        write_flow_effective(&path, &original).unwrap();
+        let back = read_flow_effective(&path).unwrap();
+        assert_eq!(back.uuid, original.uuid);
+        assert_eq!(back.jobs.len(), 2);
+    }
+
+    #[test]
+    fn read_effective_missing_file_returns_snapshot_missing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".jm").join("flow.effective.toml");
+        let err = read_flow_effective(&path).unwrap_err();
+        match err {
+            JobManagerError::SnapshotMissing { path: p, .. } => {
+                assert_eq!(p, path);
+            }
+            other => panic!("expected SnapshotMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_effective_parse_error_returns_toml_parse() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("flow.effective.toml");
+        std::fs::write(&path, "this is = not = valid toml").unwrap();
+        let err = read_flow_effective(&path).unwrap_err();
+        assert!(matches!(err, JobManagerError::TomlParse { .. }), "got {err:?}");
     }
 }
