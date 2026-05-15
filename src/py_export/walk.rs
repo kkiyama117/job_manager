@@ -22,26 +22,7 @@ pub fn walk_flows<'py>(py: Python<'py>, root: PathBuf) -> PyResult<Bound<'py, Py
         crate::persistence::read_common(&common_path)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
     } else {
-        use gaussian_job_shared::config::common::{CommonConfig, DirectoryConfig};
-        use slurm_async_runner::entities::slurm::SlurmJobConfig;
-        CommonConfig {
-            slurm_default: SlurmJobConfig {
-                partition: String::new(),
-                time_limit: None,
-                log_stdout: None,
-                log_stderr: None,
-                comment: None,
-                job_name: None,
-                array_spec: None,
-                dependency: None,
-                mail_user: None,
-                mail_types: None,
-                resource_spec: None,
-            },
-            directories: DirectoryConfig {
-                project_root: std::path::PathBuf::from("."),
-            },
-        }
+        crate::persistence::synth_empty_common()
     };
     let common = Arc::new(common);
     pyo3_async_runtimes::tokio::future_into_py(py, async move {

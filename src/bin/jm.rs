@@ -119,7 +119,7 @@ async fn cmd_render(
     if effective_only {
         let path = resolver.flow_effective_toml(&uuid);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent).await?;
         }
         write_flow_effective(&path, &fr.flow)?;
         println!("updated .flow.effective.toml for {}", uuid);
@@ -227,26 +227,7 @@ async fn cmd_search(root: &std::path::Path, program: Option<&str>) -> anyhow::Re
     let common = if common_path.exists() {
         read_common(&common_path)?
     } else {
-        use gaussian_job_shared::config::common::{CommonConfig, DirectoryConfig};
-        use slurm_async_runner::entities::slurm::SlurmJobConfig;
-        CommonConfig {
-            slurm_default: SlurmJobConfig {
-                partition: String::new(),
-                time_limit: None,
-                log_stdout: None,
-                log_stderr: None,
-                comment: None,
-                job_name: None,
-                array_spec: None,
-                dependency: None,
-                mail_user: None,
-                mail_types: None,
-                resource_spec: None,
-            },
-            directories: DirectoryConfig {
-                project_root: std::path::PathBuf::from("."),
-            },
-        }
+        job_manager::persistence::synth_empty_common()
     };
 
     let s = walk_flows(root, Arc::new(common));

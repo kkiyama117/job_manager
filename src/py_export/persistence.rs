@@ -40,26 +40,7 @@ pub(crate) fn load_or_synth_common(flow_toml_path: &std::path::Path) -> PyResult
         inner_read_common(&common_path)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     } else {
-        use gaussian_job_shared::config::common::DirectoryConfig;
-        use slurm_async_runner::entities::slurm::SlurmJobConfig;
-        Ok(CommonConfig {
-            slurm_default: SlurmJobConfig {
-                partition: String::new(),
-                time_limit: None,
-                log_stdout: None,
-                log_stderr: None,
-                comment: None,
-                job_name: None,
-                array_spec: None,
-                dependency: None,
-                mail_user: None,
-                mail_types: None,
-                resource_spec: None,
-            },
-            directories: DirectoryConfig {
-                project_root: std::path::PathBuf::from("."),
-            },
-        })
+        Ok(crate::persistence::synth_empty_common())
     }
 }
 

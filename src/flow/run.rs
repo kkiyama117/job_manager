@@ -34,33 +34,8 @@ impl FlowRun {
         // read_flow needs a common; if user didn't provide one, fall back to a
         // synthetic default that simply requires partition to be present in
         // each [jobs.*.config].
-        let synth_common;
-        let common_for_read = match &common {
-            Some(c) => c,
-            None => {
-                use gaussian_job_shared::config::common::{CommonConfig, DirectoryConfig};
-                use slurm_async_runner::entities::slurm::SlurmJobConfig;
-                synth_common = CommonConfig {
-                    slurm_default: SlurmJobConfig {
-                        partition: String::new(),
-                        time_limit: None,
-                        log_stdout: None,
-                        log_stderr: None,
-                        comment: None,
-                        job_name: None,
-                        array_spec: None,
-                        dependency: None,
-                        mail_user: None,
-                        mail_types: None,
-                        resource_spec: None,
-                    },
-                    directories: DirectoryConfig {
-                        project_root: std::path::PathBuf::from("."),
-                    },
-                };
-                &synth_common
-            }
-        };
+        let synth_common = crate::persistence::synth_empty_common();
+        let common_for_read = common.as_ref().unwrap_or(&synth_common);
         let flow = crate::persistence::read_flow(&resolver.flow_toml(&flow_uuid), common_for_read)?;
         Ok(Self {
             flow_uuid,
