@@ -43,6 +43,7 @@ impl From<JobManagerError> for PyErr {
             | JobManagerError::ReservedJobId(_)
             | JobManagerError::JobIdParseError { .. }
             | JobManagerError::PartitionMissing { .. }
+            | JobManagerError::PartitionWrongType { .. }
             | JobManagerError::RootInferenceFailed { .. }
             | JobManagerError::FileTooLarge { .. }
             | JobManagerError::DependencyCycle { .. }
@@ -81,6 +82,25 @@ mod tests {
             .into();
             assert!(err.is_instance_of::<PyValueError>(py));
             assert!(err.to_string().contains("opt"));
+        });
+    }
+
+    #[test]
+    fn partition_wrong_type_maps_to_value_error() {
+        ensure_py();
+        Python::attach(|py| {
+            let err: PyErr = JobManagerError::PartitionWrongType {
+                job: JobId("opt".to_string()),
+                found: "integer",
+            }
+            .into();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let msg = err.to_string();
+            assert!(msg.contains("opt"), "msg should name the job: {msg}");
+            assert!(
+                msg.contains("integer"),
+                "msg should name the offending TOML type: {msg}"
+            );
         });
     }
 

@@ -99,6 +99,14 @@ pub enum JobManagerError {
     },
 
     #[error(
+        "partition for job={job} must be a string, but found TOML type '{found}'; rewrite as `partition = \"<name>\"`"
+    )]
+    PartitionWrongType {
+        job: gaussian_job_shared::entities::workflow::JobId,
+        found: &'static str,
+    },
+
+    #[error(
         "effective snapshot missing at {path} (uuid={uuid}): run `jm render <uuid>` first to materialize"
     )]
     SnapshotMissing { path: PathBuf, uuid: String },
