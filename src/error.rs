@@ -91,6 +91,16 @@ pub enum JobManagerError {
         limit: u64,
     },
 
+    #[error(
+        "partition is required but missing: job={job} has no partition and common.toml [slurm_default] has no partition either"
+    )]
+    PartitionMissing {
+        job: gaussian_job_shared::entities::workflow::JobId,
+    },
+
+    #[error("snapshot missing at {path} (uuid={uuid}); run `jm render {uuid}` to generate it")]
+    SnapshotMissing { path: PathBuf, uuid: String },
+
     #[error("{0}")]
     Other(String),
 }
@@ -139,5 +149,15 @@ mod tests {
         let err = JobManagerError::ReservedJobId("flow".to_string());
         assert!(err.to_string().contains("flow"));
         assert!(err.to_string().contains("reserved"));
+    }
+
+    #[test]
+    fn partition_missing_carries_job_id() {
+        let err = JobManagerError::PartitionMissing {
+            job: gaussian_job_shared::entities::workflow::JobId("opt".to_string()),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("opt"), "msg = {msg}");
+        assert!(msg.contains("partition"), "msg = {msg}");
     }
 }
