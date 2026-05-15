@@ -2,9 +2,55 @@
 
 use std::path::Path;
 
-use gaussian_job_shared::entities::workflow::JobFlow;
+use gaussian_job_shared::entities::workflow::{JobFlow, JobId};
 
 use crate::error::JobManagerError;
+
+/// Walk `[jobs.*.config]` tables, ensuring each has a `partition` key.
+/// Missing tables are created. Missing partition entries are filled from
+/// `common_partition` (passed as `Option<&str>` so the caller can express
+/// "common has no partition either"). Returns `PartitionMissing { job }`
+/// if both flow and common lack a partition for some job.
+fn inject_partition_defaults(
+    v: &mut toml::Value,
+    common_partition: Option<&str>,
+) -> Result<(), JobManagerError> {
+    let jobs = match v.get_mut("jobs").and_then(|j| j.as_table_mut()) {
+        Some(t) => t,
+        None => return Ok(()), // no [jobs] table — let downstream serde report it
+    };
+
+    for (job_id_str, job_val) in jobs.iter_mut() {
+        let job_t = match job_val.as_table_mut() {
+            Some(t) => t,
+            None => continue, // malformed; serde will complain
+        };
+
+        let cfg = job_t
+            .entry("config")
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        let cfg_t = match cfg.as_table_mut() {
+            Some(t) => t,
+            None => continue,
+        };
+
+        if cfg_t.contains_key("partition") {
+            continue;
+        }
+
+        match common_partition {
+            Some(p) => {
+                cfg_t.insert("partition".to_string(), toml::Value::String(p.to_string()));
+            }
+            None => {
+                return Err(JobManagerError::PartitionMissing {
+                    job: JobId(job_id_str.clone()),
+                });
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Read a `JobFlow` from a TOML file at `path`.
 pub fn read_flow(path: &Path) -> Result<JobFlow, JobManagerError> {
@@ -81,6 +127,122 @@ mod tests {
             tags: BTreeMap::new(),
             jobs,
         }
+    }
+
+    #[test]
+    fn inject_adds_partition_when_missing_in_flow() {
+        let mut v: toml::Value = toml::from_str(
+            r#"
+uuid = "01999999-0000-7000-8000-000000000000"
+created_at = "2026-05-15T00:00:00Z"
+[jobs.opt]
+program = "echo"
+body = "true"
+[jobs.opt.config]
+"#,
+        )
+        .unwrap();
+        super::inject_partition_defaults(&mut v, Some("long")).unwrap();
+        let p = v["jobs"]["opt"]["config"]["partition"].as_str().unwrap();
+        assert_eq!(p, "long");
+    }
+
+    #[test]
+    fn inject_keeps_partition_when_already_set_in_flow() {
+        let mut v: toml::Value = toml::from_str(
+            r#"
+uuid = "01999999-0000-7000-8000-000000000000"
+created_at = "2026-05-15T00:00:00Z"
+[jobs.opt]
+program = "echo"
+body = "true"
+[jobs.opt.config]
+partition = "short"
+"#,
+        )
+        .unwrap();
+        super::inject_partition_defaults(&mut v, Some("long")).unwrap();
+        let p = v["jobs"]["opt"]["config"]["partition"].as_str().unwrap();
+        assert_eq!(p, "short", "explicit flow partition must win over common");
+    }
+
+    #[test]
+    fn inject_creates_missing_config_table() {
+        let mut v: toml::Value = toml::from_str(
+            r#"
+uuid = "01999999-0000-7000-8000-000000000000"
+created_at = "2026-05-15T00:00:00Z"
+[jobs.opt]
+program = "echo"
+body = "true"
+"#,
+        )
+        .unwrap();
+        super::inject_partition_defaults(&mut v, Some("long")).unwrap();
+        let p = v["jobs"]["opt"]["config"]["partition"].as_str().unwrap();
+        assert_eq!(p, "long");
+    }
+
+    #[test]
+    fn inject_returns_partition_missing_when_both_missing() {
+        let mut v: toml::Value = toml::from_str(
+            r#"
+uuid = "01999999-0000-7000-8000-000000000000"
+created_at = "2026-05-15T00:00:00Z"
+[jobs.opt]
+program = "echo"
+body = "true"
+[jobs.opt.config]
+"#,
+        )
+        .unwrap();
+        let err = super::inject_partition_defaults(&mut v, None).unwrap_err();
+        match err {
+            JobManagerError::PartitionMissing { job } => assert_eq!(job.0, "opt"),
+            other => panic!("expected PartitionMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inject_idempotent_on_already_injected_table() {
+        let mut v: toml::Value = toml::from_str(
+            r#"
+uuid = "01999999-0000-7000-8000-000000000000"
+created_at = "2026-05-15T00:00:00Z"
+[jobs.opt]
+program = "echo"
+body = "true"
+[jobs.opt.config]
+"#,
+        )
+        .unwrap();
+        super::inject_partition_defaults(&mut v, Some("long")).unwrap();
+        super::inject_partition_defaults(&mut v, Some("long")).unwrap();
+        let p = v["jobs"]["opt"]["config"]["partition"].as_str().unwrap();
+        assert_eq!(p, "long");
+    }
+
+    #[test]
+    fn inject_handles_multiple_jobs_mixed() {
+        let mut v: toml::Value = toml::from_str(
+            r#"
+uuid = "01999999-0000-7000-8000-000000000000"
+created_at = "2026-05-15T00:00:00Z"
+[jobs.a]
+program = "echo"
+body = "true"
+[jobs.a.config]
+partition = "short"
+[jobs.b]
+program = "echo"
+body = "true"
+[jobs.b.config]
+"#,
+        )
+        .unwrap();
+        super::inject_partition_defaults(&mut v, Some("long")).unwrap();
+        assert_eq!(v["jobs"]["a"]["config"]["partition"].as_str().unwrap(), "short");
+        assert_eq!(v["jobs"]["b"]["config"]["partition"].as_str().unwrap(), "long");
     }
 
     #[test]
