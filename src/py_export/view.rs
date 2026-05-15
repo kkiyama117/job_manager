@@ -6,6 +6,7 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use crate::persistence::flow::read_flow;
 use crate::persistence::job_run::read_job_run;
+use crate::py_export::persistence::load_or_synth_common;
 use crate::persistence::path::PathResolver;
 use crate::py_export::path::PyPathResolver;
 use crate::view::CalcView;
@@ -26,7 +27,9 @@ impl PyCalcView {
     fn new(resolver: &PyPathResolver, flow_uuid: &str, job_id: &str) -> PyResult<Self> {
         let uuid = uuid::Uuid::parse_str(flow_uuid)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad uuid: {e}")))?;
-        let flow = read_flow(&resolver.inner.flow_toml(&uuid))?;
+        let flow_path = resolver.inner.flow_toml(&uuid);
+        let common = load_or_synth_common(&flow_path)?;
+        let flow = read_flow(&flow_path, &common)?;
         let jid = gaussian_job_shared::entities::workflow::JobId::from(job_id);
         if !flow.jobs.contains_key(&jid) {
             return Err(crate::error::JobManagerError::JobNotFound {
