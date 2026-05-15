@@ -250,7 +250,7 @@ flips inside the same `tick` pass that recorded the parent's
 `Failed`. At the same time, SLURM's own `afterok` cancels the child
 server-side once the parent exits non-zero — usually before any
 compute node allocates the child — so there's no stdout file to
-capture. `outputs-fail/<uuid>/freq__compound=1/` will have
+capture. `outputs-fail/<uuid>/.jm/freq__compound=1/` will have
 `batch.bash` (rendered at submit time) and `status.toml`
 (`lifecycle = "skipped"`), but no `slurm-*.out`.
 
@@ -258,7 +258,7 @@ capture. `outputs-fail/<uuid>/freq__compound=1/` will have
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `sbatch: error: invalid partition specified: REPLACE_ME` | sed step skipped, or only `common.toml` rewritten — every per-job `partition` overrides it when non-empty | re-run both `sed` commands against `$ROOT/common.toml` and `$ROOT/$UUID/flow.toml`; sanity-check with `! grep -rn REPLACE_ME "$ROOT"` |
+| `sbatch: error: invalid partition specified: REPLACE_ME` | sed step skipped; `common.toml [slurm_default].partition` still holds the sentinel and gets injected into every job at `read_flow` time (F2 partition defaulting) | re-run the `sed` command against `$ROOT/common.toml`; sanity-check with `! grep -rn REPLACE_ME "$ROOT"` |
 | `error while loading shared libraries: libpython3.13.so.1.0` | built `jm` with default features | rebuild with `--no-default-features` |
 | `Error: ... missing field 'partition'` | edited `common.toml` and deleted the line | `partition` is required by `SlurmJobConfig`; restore it |
 | `freq__compound=1` shows `lifecycle = "failed"` instead of `"skipped"` | `tick` had not seen the parent's `Failed` yet when the child was checked | run `tick` again — the next pass will pick up the parent transition and emit `Skipped` |
