@@ -1,0 +1,26 @@
+# Optional root-level common.toml — SLURM resource defaults merged into
+# each job's SlurmJobConfig at submit time via `merge_with_defaults`.
+#
+# Schema: gaussian_job_shared::config::CommonConfig (deny_unknown_fields)
+#   [slurm_default]  → slurm_async_runner::entities::slurm::SlurmJobConfig
+#   [directories]    → DirectoryConfig { project_root: PathBuf }
+#
+# These values are placeholders — swap `partition`, `mail_user`, log paths,
+# and `project_root` for your cluster before running. `partition` is a
+# required field on `SlurmJobConfig`, so it must be set; leaving the
+# REPLACE_ME sentinel will fail at `sbatch` with "invalid partition
+# specified: REPLACE_ME" — a clearer signal than picking a name that
+# looks real (e.g. "debug") and may or may not exist on your cluster.
+
+[slurm_default]
+partition  = "REPLACE_ME"          # ← set to a real partition on your cluster (sinfo -s)
+time_limit = "00:10:00"
+job_name   = "jm-simple"
+# Uncomment + adapt to keep SLURM stdout/stderr next to the job's
+# batch.bash instead of dropping them in whatever directory you ran
+# `jm submit` from. `%j` is the SLURM job id; `%x` is `job_name`.
+# log_stdout = "<absolute_project_root>/%x.%j.out"
+# log_stderr = "<absolute_project_root>/%x.%j.err"
+
+[directories]
+project_root = "REPLACE_ME"        # ← absolute, writable path on the cluster filesystem; tilde / $HOME are NOT expanded by the TOML loader

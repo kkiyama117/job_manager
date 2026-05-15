@@ -20,22 +20,37 @@ No global toolchain selection needed.
 
 ## Repository layout
 
-Upstream crates live as **siblings** of this repo on disk:
-
 ```
-GAUSSIAN_repo_packages/
-├── gaussian-job-shared2/   # D2 — JobFlow, Job, JobId
-├── slurm-async-runner2/    # A1 — SlurmManager, JobStatus
-└── job-manager/            # this repo
-    ├── Cargo.toml          # has path = "../gaussian-job-shared2" etc.
-    ├── src/                # Rust crate
-    ├── python/             # Python facade + tests + .pyi
-    ├── tests/              # Rust integration tests
-    └── docs/               # this directory
+job-manager/
+├── Cargo.toml          # D2/A1 pulled from GitHub via `git = "..."`
+├── src/                # Rust crate
+├── python/             # Python facade + tests + .pyi
+├── tests/              # Rust integration tests
+└── docs/               # this directory
 ```
 
-If the sibling layout is missing, `cargo build` fails on the path
-dependency resolution. Clone all three before building.
+Upstream crates are fetched directly from GitHub at build time:
+
+- D2 (`gaussian_job_shared`) — `https://github.com/kkiyama117/gaussian_job_shared.git`
+- A1 (`slurm_async_runner`)  — `https://github.com/kkiyama117/slurm-async-runner.git`
+
+Both consumed with `default-features = false` to respect the
+[Pyclass Single Owner rule](./architecture.md#pyclass-single-owner-rule).
+No sibling-repo checkout is required.
+
+To work against a local checkout of D2 or A1 during development, override
+the resolver in your global Cargo config (`~/.cargo/config.toml`) rather
+than editing this repo's `Cargo.toml`:
+
+```toml
+[patch."https://github.com/kkiyama117/gaussian_job_shared.git"]
+gaussian_job_shared = { path = "/path/to/your/gaussian-job-shared2" }
+
+[patch."https://github.com/kkiyama117/slurm-async-runner.git"]
+slurm_async_runner  = { path = "/path/to/your/slurm-async-runner2" }
+```
+
+Keep the override out of git — it's a per-machine concern.
 
 ## First-time setup
 
@@ -215,10 +230,11 @@ this is wired up automatically.
 
 ## Common pitfalls
 
-- **Type mismatch between `JobStatus` from D2 vs A1.** Resolved by the
-  `[patch."https://github.com/kkiyama117/slurm-async-runner.git"]`
-  block in `Cargo.toml`. If you ever see `expected JobStatus, found
-  JobStatus` from cargo, that block has been removed or paths drifted —
+- **Type mismatch between `JobStatus` from D2 vs A1.** D2 references
+  `slurm-async-runner` with the same git URL (no `rev`) that this crate
+  uses, so the resolver unifies them onto a single source entry. If you
+  ever see `expected JobStatus, found JobStatus` from cargo, someone
+  has pinned a specific `rev` on one side without patching the other —
   see [architecture.md](./architecture.md#pyclass-single-owner-rule).
 - **`asyncio.run(walk_flows(...))` fails with "no running event loop".**
   `pyo3-async-runtimes` binds the future to the loop at *call time*,
@@ -229,8 +245,8 @@ this is wired up automatically.
   asyncio.run(run(root))
   ```
 - **`isinstance` returns `False` across crate boundaries.** A new
-  pyclass was probably added to a sibling cdylib without disabling its
-  `pyo3` feature here. See the **Pyclass Single Owner rule** in
+  pyclass was probably added to an upstream cdylib without disabling
+  its `pyo3` feature here. See the **Pyclass Single Owner rule** in
   [architecture.md](./architecture.md#pyclass-single-owner-rule).
 - **`stub_gen` segfaults or fails to link.** A duplicate
   `#[gen_stub_pyfunction]` on both the outer pymodule export *and* the
@@ -240,8 +256,10 @@ this is wired up automatically.
 ## Running the `jm` CLI locally
 
 ```bash
-# Build the binary (debug)
-cargo build --bin jm
+# Build the binary (debug). `--no-default-features` strips the pyo3
+# stack so `jm` is not dynamically linked against libpython3.13 — see
+# the deployment note below.
+cargo build --bin jm --no-default-features
 ./target/debug/jm --root /work render <flow_uuid>
 ./target/debug/jm --root /work submit <flow_uuid> --dry-run
 ./target/debug/jm --root /work tick   <flow_uuid>
@@ -252,6 +270,30 @@ cargo build --bin jm
 `--root <path>` or `JM_ROOT=<path>` is required for every subcommand.
 `<flow_uuid>` is a bare UUID string or an absolute path whose last
 component is the UUID.
+
+### Deploying `jm` on a SLURM node without libpython
+
+The default Cargo features (`pyo3 + stub_gen`) are needed for the
+`stub_gen` binary and the Python extension build, but they also wire
+`libpython3.13.so.1.0` into the `jm` binary's dynamic-link table. On
+login / compute nodes that don't ship CPython, the result is:
+
+```
+./jm: error while loading shared libraries: libpython3.13.so.1.0:
+cannot open shared object file: No such file or directory
+```
+
+Two options:
+
+1. Build with `--no-default-features` and ship the resulting binary —
+   `jm` itself never calls into Python, so this is the right answer
+   for production:
+   ```bash
+   cargo build --release --bin jm --no-default-features
+   scp target/release/jm <login-node>:~/bin/
+   ```
+2. (Discouraged) install CPython 3.13 on the target node so the
+   abi3-linked `jm` can find `libpython3.13.so.1.0` at runtime.
 
 ## Workflow
 
@@ -266,6 +308,21 @@ For full feature work the project follows the superpowers planning loop:
 
 SP-1, SP-2, and SP-3 (v1 + v2) all follow this shape. The active spec
 is `2026-05-13-job-manager-sp3-rearch-design.md` (v2).
+
+## `.gitignore` for program-managed `.jm/`
+
+`<root>/<flow_uuid>/.jm/` (snapshot, batch.bash, status, slurm-*.out/err)
+is program-managed. To keep git tracking `flow.toml` and `plan.toml`
+while ignoring program output for a specific flow, drop a `.gitignore`
+file inside each flow_dir:
+
+```
+<root>/<flow_uuid>/.gitignore
+```
+
+containing just `.jm/`. A repo-root `.gitignore` cannot blanket-ignore
+`.jm/` because `examples/*/outputs/<uuid>/.jm/` IS commit territory
+(it's the snapshot we want shipped alongside the example).
 
 ## Commit & PR
 

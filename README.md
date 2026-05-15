@@ -14,46 +14,194 @@ TaskInstance, `Lifecycle` ≈ TaskState.
 
 ## Capabilities
 
-### Orchestration (SP-3)
+job-manager is plumbing. You bring three on-disk artifacts under a
+working root, then drive `jm` (or the Python async API) against them.
 
-| Surface | Rust | Python |
-|---|---|---|
-| `FlowRun` aggregate (flow_uuid + JobFlow + ExperimentPlan + Option<CommonConfig>) | `flow::FlowRun` | `job_manager.FlowRun` |
-| Topological order + cycle detection | `FlowRun::topological_order()` | (used by `submit_flow`) |
-| Render → submit → write `.status.toml` | `runner::FlowRunner::{submit, tick, render_only}` | `await job_manager.submit_flow(root, uuid, dry_run)` |
-| SLURM submit abstraction (3 impls) | `slurm::executor::{Executor, SbatchExecutor, DryRunExecutor, MockExecutor}` | (internal) |
-| SLURM query abstraction (3 impls) | `slurm::querier::{Querier, SlurmQuerier, InMemoryQuerier, MockQuerier}` | (internal) |
-| State transition (pure) | `runner::transition::{decide_transition, Decision, TickResult}` | (internal) |
-| Bash render (env-export style) | `render::render_batch_bash` | `job_manager.render_batch_bash` |
+### On-disk layout you prepare
 
-### Persistence
+```
+<root>/                          ← --root / JM_ROOT
+├── common.toml                  ← (optional) SLURM resource defaults shared by all flows
+└── <flow_uuid>/
+    ├── flow.toml                ← D2 JobFlow DAG (jobs + edges)
+    └── plan.toml                ← ExperimentPlan — per-JobId render params
+```
 
-| Surface | Rust | Python |
-|---|---|---|
-| Path composition | `persistence::PathResolver` | `job_manager.PathResolver` |
-| `flow.toml` I/O | `persistence::flow::{read_flow, write_flow}` | `read_flow` / `write_flow` |
-| `plan.toml` I/O | `persistence::plan::{read_plan, write_plan}` | `read_plan` / `write_plan` |
-| `common.toml` I/O | `persistence::common::{read_common, write_common}` | `read_common` / `write_common` |
-| `.status.toml` I/O | `persistence::job_run::{read_job_run, write_job_run}` | `read_job_run` / `write_job_run` |
-| `JobRun` data type | `job::{JobRun, Lifecycle}` | `JobRun` / `Lifecycle` |
-| `ExperimentPlan` data type | `plan::ExperimentPlan` | `ExperimentPlan` |
-| `CommonConfig` (defaults merge) | `persistence::merge_with_defaults` | (internal) |
+After `jm submit` (or `jm render`), the same tree fills with a
+program-managed `.jm/` subtree:
 
-### Search / discovery
+```
+<root>/<flow_uuid>/
+├── flow.toml                    ← user input (read-only from jm's perspective)
+├── plan.toml                    ← user input
+└── .jm/                         ← program-managed (safe to .gitignore per-flow)
+    ├── flow.effective.toml      ← materialized snapshot (Cargo.lock analogue)
+    └── <JobId>/
+        ├── batch.bash           ← rendered sbatch script (chmod 0600)
+        ├── slurm-<id>.out/.err  ← SLURM stdout/stderr
+        └── status.toml          ← lifecycle + slurm_jobid + JobStatus
+```
 
-| Surface | Rust | Python |
-|---|---|---|
-| Parallel walk over `<root>/<uuid>/flow.toml` | `walk::walk_flows` (Stream) | `await job_manager.walk_flows(root)` |
-| Post-walk filter | `search::{SearchFilter, matches}` | `SearchFilter` |
-| Per-Job facade | `view::CalcView` | `CalcView` |
+`PathResolver` is the single source of truth for these paths. The
+`.jm/` subdir isolates everything `jm` writes from user-authored
+inputs, so a per-flow `.gitignore` containing just `.jm/` cleanly
+separates committed inputs from program output. Per-flow `common.toml`
+is **not** supported — there is one `common.toml` per root.
 
-### Helpers (SP-2)
+### `common.toml` partition defaulting
 
-| Surface | Rust | Python |
-|---|---|---|
-| `JobId` build | `jobid::build_job_id(step_id, axis_combo)` | `build_job_id` |
-| `JobId` parse | `jobid::parse_job_id(s)` → `JobIdParts` | `parse_job_id` (returns dict) |
-| Step / job id validation | `jobid::{validate_step_id, validate_job_id}` | `validate_*` |
+`flow.toml` may omit `[jobs.*.config] partition`; the value flows in
+from `common.toml [slurm_default] partition` at `read_flow` time. If
+both are missing the read fails with a job-pointed `PartitionMissing`
+error; a non-string `partition` value fails with `PartitionWrongType`
+naming the offending TOML type. This mirrors Airflow's `default_args`
+inheritance and Prefect's Work Pool `base_job_template` — see
+[`docs/architecture.md`](./docs/architecture.md#commontoml-as-pool-template-airflow--prefect-mapping).
+
+### `.flow.effective.toml` — materialized snapshot
+
+`jm render` and `jm submit` write `<flow_uuid>/.jm/flow.effective.toml`
+with every default resolved. `jm tick` and `jm show` read this
+snapshot (via `FlowRun::load_effective`) and do **not** need
+`common.toml` at runtime. Use `jm render --effective-only <uuid>` to
+regenerate just the snapshot without re-rendering every `batch.bash`.
+
+### 1. Author inputs in Python
+
+`ExperimentPlan` is a flat `{ job_id → params }` table. Compose
+`JobId`s with `build_job_id(step_id, axis_combo)` and expand sweeps
+with plain `itertools`:
+
+```python
+from itertools import product
+from job_manager import ExperimentPlan, PathResolver, build_job_id, write_plan
+
+compounds = ["benzene", "toluene", "p-xylene"]
+methods = [{"name": "b3lyp", "route": "B3LYP"}, {"name": "m062x", "route": "M06-2X"}]
+
+params: dict[str, dict] = {}
+for (i, c), (j, m) in product(enumerate(compounds), enumerate(methods)):
+    opt_id  = build_job_id("opt",  [("compound", i), ("method", j)])
+    freq_id = build_job_id("freq", [("compound", i), ("method", j)])
+    params[opt_id]  = {"route": f"# {m['route']}/6-31G* opt",  "compound": c, "nproc": 16}
+    params[freq_id] = {"route": f"# {m['route']}/6-31G* freq", "compound": c, "nproc": 16}
+
+plan = ExperimentPlan(params)        # 12 jobs
+
+resolver = PathResolver("/work")
+uuid = "01997cdc-0000-7000-8000-000000000000"
+write_plan(resolver.plan_toml(uuid), plan)
+# write_flow(resolver.flow_toml(uuid), flow_toml_text)   # D2 JobFlow (build via D2's API)
+```
+
+`build_job_id` also validates: `validate_step_id` / `validate_job_id`
+reject reserved names (`flow`, `plan`, `experiment`, `derived`,
+`status`), unsafe characters (`/`, `=`, whitespace), and path
+traversal. The library refuses to render or submit if a `JobId` would
+escape its parent directory.
+
+The DAG itself (`flow.toml`) is plain D2 `JobFlow` — build it with
+D2's Rust/Python API. Sweep expansion, parent resolution, and any DSL
+on top of this live in the **caller**; this library deliberately stops
+at the data layer.
+
+### 2. Drive a flow from the shell
+
+```bash
+# render every batch.bash + write .jm/flow.effective.toml snapshot
+jm --root /work render <flow_uuid>
+
+# regenerate ONLY .jm/flow.effective.toml without touching batch.bash
+jm --root /work render <flow_uuid> --effective-only
+
+# submit all jobs in topological order (writes .jm/<JobId>/status.toml as it goes)
+jm --root /work submit <flow_uuid>
+jm --root /work submit <flow_uuid> --dry-run     # rehearse: DryRunExecutor + InMemoryQuerier
+
+# query SLURM and reconcile every status.toml under the flow (snapshot-driven; no common.toml needed)
+jm --root /work tick <flow_uuid>
+
+# inspect the flow + per-job lifecycle (snapshot-driven)
+jm --root /work show <flow_uuid>
+
+# cross-flow search across <root>/*/flow.toml
+jm --root /work search --program g16
+```
+
+`--root <path>` is required for every subcommand (including
+`search`). `JM_ROOT=<path>` works as a fallback. Paths are
+canonicalized at entry (`..` and symlinks resolved). `<flow_uuid>` is
+a bare UUID string or an absolute path whose last component is the UUID.
+
+### 3. Reconcile on a timer
+
+`tick` is idempotent and safe to schedule. A minimal cron entry:
+
+```cron
+*/5 * * * * jm --root /work tick <flow_uuid>
+```
+
+`decide_transition` is pure and is the **only** writer of
+`Success`/`Failed`. Terminal states (`Success | Failed | Skipped`) are
+never overwritten. `Skipped` propagates from a `Failed` or `Skipped`
+parent on an `afterok` edge and carries the actual culprit `JobId` so
+you can render an accurate cause chain.
+
+### 4. Drive from Python instead
+
+```python
+import asyncio
+import job_manager
+
+async def run(root: str, uuid: str):
+    # submit returns dict[JobId, slurm_jobid] — empty when dry_run=True
+    jobids = await job_manager.submit_flow(root, uuid, dry_run=False)
+    return jobids
+
+asyncio.run(run("/work", "01997cdc-..."))
+```
+
+Snapshot-driven reads (after `jm render` / `jm submit` has materialized
+`<flow_uuid>/.jm/flow.effective.toml`) don't need `common.toml`:
+
+```python
+from job_manager import PathResolver, read_flow_effective
+
+resolver = PathResolver("/work")
+flow = read_flow_effective(resolver.flow_effective_toml("01997cdc-..."))
+```
+
+> ⚠ `submit_flow` / `walk_flows` bind to the **running** event loop at
+> *call time*, not at await time. Always invoke from inside an
+> existing coroutine — `asyncio.run(job_manager.submit_flow(...))`
+> fails with "no running event loop".
+
+### 5. Discover across flows
+
+`walk_flows(root)` walks `<root>/*/flow.toml` in parallel
+(`JOB_MANAGER_PARALLELISM` env var, default 32). One malformed
+`flow.toml` surfaces as an error entry without aborting the rest.
+
+`SearchFilter` is a post-walk predicate — filter by `program` /
+`tags` / `status` / `flow_uuid_prefix` / `created_after` /
+`created_before` / `slurm_jobid` / `job_id`.
+
+```python
+import asyncio, job_manager
+
+async def find_g16_failures():
+    flows = await job_manager.walk_flows("/work")
+    f = job_manager.SearchFilter(
+        program="g16",
+        status=job_manager.Lifecycle.Failed,
+    )
+    # filtering happens in the caller — see search::matches in Rust
+    return flows, f
+```
+
+`CalcView(resolver, flow_uuid, job_id)` is the per-Job facade — it
+exposes `job_dir`, `status_path`, `status()`, and `files()` (filtering
+out dot-prefixed entries like `.status.toml`).
 
 ## Lifecycle state machine (5 values)
 
@@ -73,54 +221,9 @@ TaskInstance, `Lifecycle` ≈ TaskState.
 ```
 
 `Lifecycle::is_terminal()` → `Success | Failed | Skipped`. `Skipped` is
-Airflow's `upstream_failed` analogue: emitted by `decide_transition` when
-any parent is `Failed`/`Skipped`, carrying the actual culprit `JobId` in
-`Decision::SkipDueToParent { parent }`.
-
-## CLI (`jm`)
-
-The `jm` binary is built alongside the library (`cargo build`).
-
-```bash
-# 1. render batch.bash only — no sbatch call
-jm --root /work render <flow_uuid>
-
-# 2. submit to SLURM (or DryRunExecutor + InMemoryQuerier when --dry-run)
-jm --root /work submit <flow_uuid>
-jm --root /work submit <flow_uuid> --dry-run
-
-# 3. poll SLURM and apply transitions to .status.toml
-jm --root /work tick <flow_uuid>
-
-# 4. inspect flow + per-job status
-jm --root /work show <flow_uuid>
-
-# 5. cross-flow search
-jm --root /work search --program g16
-```
-
-`--root` accepts an explicit path or falls back to `JM_ROOT`, and is
-required for every subcommand including `search`. Paths are
-canonicalized (resolves `..` and symlinks). `<flow_uuid>` may be a bare
-UUID string or an absolute path whose last component is the UUID.
-
-## Python async API
-
-```python
-import asyncio
-import job_manager
-
-async def go(root: str, uuid: str):
-    # submit returns dict[JobId, slurm_jobid] — empty when dry_run=True
-    jobids = await job_manager.submit_flow(root, uuid, dry_run=False)
-    print(jobids)
-
-asyncio.run(go("/work", "01997cdc-..."))
-```
-
-`submit_flow` resolves to a coroutine bound to the *running* event loop
-at call time, so always invoke it from inside `asyncio.run(...)` or an
-existing coroutine. Same constraint applies to `walk_flows`.
+Airflow's `upstream_failed` analogue: emitted by `decide_transition`
+when any parent is `Failed`/`Skipped`, carrying the actual culprit
+`JobId` in `Decision::SkipDueToParent { parent }`.
 
 ## Development
 
@@ -130,14 +233,15 @@ test, lint, stub regeneration, common pitfalls.
 ## Further reading
 
 See [`docs/`](./docs/README.md) for:
+- [`API.md`](./docs/API.md) — full Rust / Python surface and file schemas
 - [`architecture.md`](./docs/architecture.md) — module map, on-disk
-  layout, data flow, lifecycle model, Pyclass Single Owner rule.
+  layout, data flow, lifecycle model, Pyclass Single Owner rule
 - [`references/orchestration-systems.md`](./docs/references/orchestration-systems.md) —
   Airflow / Prefect vocabulary alignment that informs the SP-3 design.
 
 ## Out of scope
 
-- experiment DSL / sweep expansion / parent resolution (user writes
+- experiment DSL / sweep expansion / parent resolution (caller writes
   this in Python — itertools / f-string / direct `JobEdge` construction)
 - webhook trigger / long-running worker daemon
 - per-flow `common.toml` (only root-level `common.toml` supported)

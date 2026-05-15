@@ -9,9 +9,9 @@
 # `git diff --exit-code` step fails and prints the drift, blocking the
 # release/merge until the contributor regenerates locally and commits.
 #
-# Sibling-crate checkout pattern: see .github/workflows/CI.yml header.
-# `cargo run --bin stub_gen` resolves `path = "../slurm-async-runner2"` /
-# `path = "../gaussian-job-shared2"` against this layout.
+# Upstream crates (gaussian_job_shared, slurm_async_runner) are pulled
+# directly from GitHub via `git = "..."` in Cargo.toml, so this workflow
+# only needs to check out this repository.
 name: stub-check
 
 on:
@@ -26,21 +26,8 @@ permissions:
 jobs:
   verify-stubs:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: job_manager
     steps:
       - uses: actions/checkout@v6
-        with:
-          path: job_manager
-      - uses: actions/checkout@v6
-        with:
-          repository: kkiyama117/slurm-async-runner
-          path: slurm-async-runner2
-      - uses: actions/checkout@v6
-        with:
-          repository: kkiyama117/gaussian_job_shared
-          path: gaussian-job-shared2
 
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         # rust-toolchain.toml selects nightly; this action respects it.
@@ -48,8 +35,6 @@ jobs:
 
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: job_manager
 
       - uses: actions/setup-python@v6
         with:

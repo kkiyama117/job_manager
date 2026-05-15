@@ -5,47 +5,93 @@
 
 use pyo3::prelude::*;
 
+use crate::error::JobManagerError;
 use crate::persistence::common::{
     read_common as inner_read_common, write_common as inner_write_common,
 };
-use crate::persistence::flow::{read_flow as inner_read_flow, write_flow as inner_write_flow};
+use crate::persistence::flow::{
+    read_flow as inner_read_flow, read_flow_effective as inner_read_flow_effective,
+    write_flow as inner_write_flow,
+};
 use gaussian_job_shared::config::common::CommonConfig;
 use gaussian_job_shared::entities::workflow::JobFlow;
+
+/// Infer the `<root>` path from a `<root>/<flow_uuid>/flow.toml` path so we
+/// can locate `<root>/common.toml`. Returns RootInferenceFailed if the path
+/// is shorter than `<root>/<flow_uuid>/flow.toml`.
+pub(crate) fn infer_root_common(
+    path: &std::path::Path,
+) -> Result<std::path::PathBuf, JobManagerError> {
+    path.parent()
+        .and_then(|flow_dir| flow_dir.parent())
+        .map(|root| root.join("common.toml"))
+        .ok_or_else(|| JobManagerError::RootInferenceFailed {
+            path: path.to_path_buf(),
+        })
+}
+
+/// Build a CommonConfig from `<root>/common.toml`, or synthesize an empty
+/// one (partition="") when the file doesn't exist. Used so PyO3 callers
+/// can keep their simple `read_flow(path)` ergonomics.
+pub(crate) fn load_or_synth_common(flow_toml_path: &std::path::Path) -> PyResult<CommonConfig> {
+    let common_path = infer_root_common(flow_toml_path)?;
+    if common_path.exists() {
+        Ok(inner_read_common(&common_path)?)
+    } else {
+        // Surface the fallback so users who *intended* to provide a common.toml
+        // can spot a missing/misplaced file before hitting a PartitionMissing
+        // later. INFO (not WARN) because the fallback is a documented mode.
+        tracing::info!(
+            common_path = %common_path.display(),
+            "common.toml not found; falling back to synth_empty_common (every job must carry its own partition)"
+        );
+        Ok(crate::persistence::synth_empty_common())
+    }
+}
 
 // Not annotated with `#[pyfunction]` directly — the `#[pymodule]` in
 // `py_export/mod.rs` re-declares the pyfunction wrappers to avoid duplicate
 // stub-gen registrations.
 
 /// Read `common.toml` and return its serialized TOML body as a `str`.
-///
-/// `CommonConfig` is owned by D2 and has no pyclass, so we round-trip via TOML.
 pub fn read_common(path: std::path::PathBuf) -> PyResult<String> {
-    let cc = inner_read_common(&path)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-    toml::to_string(&cc).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    let cc = inner_read_common(&path)?;
+    Ok(toml::to_string(&cc).map_err(JobManagerError::from)?)
 }
 
 /// Write `common.toml` from a TOML string body.
 pub fn write_common(path: std::path::PathBuf, toml_str: &str) -> PyResult<()> {
+    // toml::de::Error is not a JobManagerError variant; user-facing parse
+    // failures still surface as PyValueError directly.
     let cc: CommonConfig = toml::from_str(toml_str)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    inner_write_common(&path, &cc)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    inner_write_common(&path, &cc)?;
+    Ok(())
 }
 
 /// Read `flow.toml` and return its serialized TOML body as a `str`.
 ///
-/// `JobFlow` is owned by D2 and has no pyclass, so we round-trip via TOML.
+/// Infers `<root>/common.toml` from the given flow.toml path so the caller
+/// doesn't have to pass a `CommonConfig`. Synthesizes an empty `CommonConfig`
+/// (partition="") when `common.toml` is absent.
 pub fn read_flow(path: std::path::PathBuf) -> PyResult<String> {
-    let fl = inner_read_flow(&path)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-    toml::to_string(&fl).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    let common = load_or_synth_common(&path)?;
+    let fl = inner_read_flow(&path, &common)?;
+    Ok(toml::to_string(&fl).map_err(JobManagerError::from)?)
 }
 
 /// Write `flow.toml` from a TOML string body.
 pub fn write_flow(path: std::path::PathBuf, toml_str: &str) -> PyResult<()> {
+    // toml::de::Error is not a JobManagerError variant; user-facing parse
+    // failures still surface as PyValueError directly.
     let fl: JobFlow = toml::from_str(toml_str)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    inner_write_flow(&path, &fl)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    inner_write_flow(&path, &fl)?;
+    Ok(())
+}
+
+/// Read a materialized snapshot (`.flow.effective.toml`). No common.toml required.
+pub fn read_flow_effective(path: std::path::PathBuf) -> PyResult<String> {
+    let fl = inner_read_flow_effective(&path)?;
+    Ok(toml::to_string(&fl).map_err(JobManagerError::from)?)
 }

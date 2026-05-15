@@ -1,0 +1,19 @@
+# ExperimentPlan — per-JobId render params, surfaced into batch.bash as
+# `JM_PARAM_<UPPER_NAME>` env exports by `render_batch_bash`.
+#
+# Schema: job_manager::plan::ExperimentPlan (deny_unknown_fields)
+#   jobs.<JobId> : BTreeMap<String, toml::Value>
+#
+# Every JobId that appears in `flow.toml` should have a corresponding
+# entry here (an empty table is fine). Extra params land in the rendered
+# batch.bash unchanged.
+
+[jobs.opt]
+note  = "first step: pretend we run an optimization"
+nproc = 1
+route = "echo-only"
+
+[jobs.freq]
+note  = "second step: pretend we run a frequency calc; depends on opt"
+nproc = 1
+route = "echo-only"

@@ -129,26 +129,33 @@ free of I/O imports.
 `PathResolver` is the single source of truth for path composition:
 
 ```
-<root>/                          <- PathResolver.root()
-├── common.toml                  <- PathResolver.common_toml()    (optional)
-└── <flow_uuid>/                 <- PathResolver.flow_dir(&uuid)
-    ├── flow.toml                <- PathResolver.flow_toml(&uuid) (D2 JobFlow)
-    ├── plan.toml                <- PathResolver.plan_toml(&uuid) (ExperimentPlan)
-    └── <JobId>/                 <- per-Job folder
-        ├── batch.bash           <- PathResolver.batch_bash(&uuid, &jid)
-        ├── input.gjf            <- user / grammar layer (out of scope)
-        ├── slurm-<id>.out       <- SLURM stdout
-        ├── slurm-<id>.err       <- SLURM stderr
-        └── .status.toml         <- PathResolver.status_file(&uuid, &jid)
+<root>/                              <- PathResolver.root()
+├── common.toml                      <- PathResolver.common_toml()    (optional)
+└── <flow_uuid>/                     <- PathResolver.flow_dir(&uuid)
+    ├── flow.toml                    <- PathResolver.flow_toml(&uuid)  (D2 JobFlow; user input)
+    ├── plan.toml                    <- PathResolver.plan_toml(&uuid)  (ExperimentPlan; user input)
+    └── .jm/                         <- program-managed subtree (suitable for per-flow .gitignore)
+        ├── flow.effective.toml      <- PathResolver.flow_effective_toml(&uuid)
+        └── <JobId>/                 <- per-Job folder
+            ├── batch.bash           <- PathResolver.batch_bash(&uuid, &jid)
+            ├── input.gjf            <- user / grammar layer (out of scope)
+            ├── slurm-<id>.out       <- SLURM stdout
+            ├── slurm-<id>.err       <- SLURM stderr
+            └── status.toml          <- PathResolver.status_file(&uuid, &jid)
 ```
 
 `common.toml` lives at the **root** level (one per root, shared across
 all flows). Per-flow common.toml is not supported.
 
+`flow.toml` and `plan.toml` are **read-only user input** from
+job-manager's perspective; everything the program writes goes under
+`.jm/`. This split is what makes per-flow `.gitignore` containing just
+`.jm/` a clean separator between committed inputs and program output.
+
 Status is **not** stored inside `JobFlow` so the D2 schema stays
-unchanged. The dot-prefix on `.status.toml` keeps it from colliding with
-SLURM outputs (`slurm-*.out`) and user files. `CalcView::files()` filters
-dot-prefixed entries.
+unchanged. `CalcView::files()` filters dot-prefixed entries so the
+`.jm/` subdir and any other `.*` files don't surface in the per-Job
+file listing.
 
 All TOML writes go through an atomic-rename helper with a
 **PID-suffixed tmp file** (`<name>.<pid>.tmp`) so two processes can
@@ -168,8 +175,8 @@ Re-exported from `lib.rs`:
 | `FlowRunner` / `Decision` / `TickResult` / `decide_transition` | runner | `runner` |
 | `Executor` / `SbatchExecutor` / `DryRunExecutor` / `MockExecutor` | trait + impls | `slurm::executor` |
 | `Querier` / `SlurmQuerier` / `InMemoryQuerier` | trait + impls | `slurm` |
-| `PathResolver` / `merge_with_defaults` | struct / fn | `persistence` |
-| `read_flow` / `write_flow` / `read_plan` / `write_plan` / `read_common` / `write_common` / `read_job_run` / `write_job_run` | fn | `persistence::*` |
+| `PathResolver` / `merge_with_defaults` / `synth_empty_common` | struct / fn | `persistence` |
+| `read_flow` / `write_flow` / `read_flow_effective` / `write_flow_effective` / `read_plan` / `write_plan` / `read_common` / `write_common` / `read_job_run` / `write_job_run` | fn | `persistence::*` |
 | `ExperimentPlan` | struct | `plan` |
 | `render_batch_bash` | fn | `render` |
 | `walk_flows` | fn → `Stream<Item=Result<JobFlow>>` | `walk` |
@@ -333,13 +340,18 @@ type — same `__module__` string, distinct Python type object — and
 We enforce single ownership in `Cargo.toml`:
 
 ```toml
-gaussian_job_shared = { path = "../gaussian-job-shared2", default-features = false }
-slurm_async_runner  = { path = "../slurm-async-runner2",  default-features = false }
+gaussian_job_shared = { git = "https://github.com/kkiyama117/gaussian_job_shared.git", default-features = false }
+slurm_async_runner  = { git = "https://github.com/kkiyama117/slurm-async-runner.git",  default-features = false }
 ```
 
-Plus `[patch."https://github.com/kkiyama117/slurm-async-runner.git"]`
-redirects D2's git-sourced SAR to the same local path so cargo treats
-`JobStatus`/`DependencyType` as one type.
+Both refs omit `rev`; the exact commit lives in `Cargo.lock`. D2's own
+`Cargo.toml` references `slurm-async-runner` via the same git URL (also
+unpinned), so the resolver unifies the direct and transitive references
+onto a single source entry — there is no separate `[patch.*]` block.
+If a future change pins a specific `rev` here for `slurm_async_runner`,
+add a patch redirecting D2's transitive reference to match, otherwise
+the resolver splits `JobStatus` / `DependencyType` into two compiled
+types.
 
 ## Async + GIL bridging
 
@@ -390,6 +402,26 @@ crates can write deterministic tests without a live SLURM cluster.
 `Mutex` so a panicked test still surfaces the recorded calls). The
 test suite of 100+ tests exercises submit, tick, render, search, and
 all transition rules.
+
+## common.toml as Pool template (Airflow / Prefect mapping)
+
+| job-manager | Airflow | Prefect |
+|---|---|---|
+| `common.toml [slurm_default]` | DAG `default_args` | Work Pool `base_job_template` + variables |
+| `flow.toml [jobs.*.config]` | Operator kwargs (partial) | Deployment variables (per-task override) |
+| `read_flow(path, &common)` | `apply_defaults` + DAG load | template render |
+| `.flow.effective.toml` | (not保存される) | Deployment spec (Cargo.lock 相当) |
+
+`flow.toml` の `partition` を省略すると `common.toml` の値が `read_flow` 段で TOML
+preparse によって inject される。これは Airflow の `default_args` 継承、Prefect の
+template render と同型の機構。
+
+## `.flow.effective.toml` — materialized snapshot
+
+`<flow_uuid>/.jm/flow.effective.toml` は `jm submit` / `jm render` 時に書かれる
+materialized snapshot で、Cargo.lock パターンに対応する。`flow.toml` (partial input)
+→ `.flow.effective.toml` (full spec) は一方向変換。`tick` / `show` はこの snapshot
+を読み、`common.toml` は不要。
 
 ## Deferred to future work
 

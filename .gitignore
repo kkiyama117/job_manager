@@ -1,5 +1,14 @@
 /target
 
+# SLURM stdout/stderr captures land wherever `cargo run` / `jm` is
+# invoked from when `log_stdout` / `log_stderr` are unset in
+# common.toml. Keep them out of the repo by default; real example
+# captures live under examples/*/outputs/ and are committed explicitly.
+slurm-*.out
+slurm-*.err
+!examples/**/slurm-*.out
+!examples/**/slurm-*.err
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 .pytest_cache/
@@ -69,5 +78,16 @@ docs/_build/
 # VSCode
 .vscode/
 
+# Claude Code per-worktree state. The worktrees themselves are managed
+# by `git worktree`; review artifacts are session-local.
+.claude/worktrees/
+.claude/reviews/
+
 # Pyenv
 .python-version
+
+# uv.lock is intentionally untracked: this is an application/library
+# distributed via PyPI (sdist + wheels), so downstream consumers resolve
+# their own dependency tree. Tracking would only add merge friction.
+uv.lock
+Cargo.lock

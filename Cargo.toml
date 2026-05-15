@@ -3,11 +3,6 @@ name = "job_manager"
 version = "0.1.0"
 edition = "2024"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-# "cdylib" is necessary to produce a shared library for Python to import from.
-# "rlib" is required so the `stub_gen` binary can link against this crate.
-# Python-facing module path is controlled separately via
-# `[tool.maturin] module-name` in `pyproject.toml`.
 [lib]
 crate-type = ["cdylib", "rlib"]
 name = "job_manager"
@@ -28,7 +23,7 @@ log = "0.4"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
-tokio = { version = "1.0", features = [
+tokio = { version = "1.52", features = [
   "macros",
   "rt-multi-thread",
   "sync",
@@ -41,19 +36,27 @@ async-stream = "0.3"
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "1.1"
+toml = "1.1.2"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.23", features = ["serde", "v7"] }
 
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 
 # upstream crates — Rust-only consumption (no extension-module).
 #
 # Pyclass Single Owner rule: D2/A1 own their pyclass impls. We disable
 # their `pyo3` feature so this crate's cdylib does not duplicate pyclass
 # registrations.
-gaussian_job_shared = { path = "../gaussian-job-shared2", default-features = false }
-slurm_async_runner = { path = "../slurm-async-runner2", default-features = false }
+
+# Do NOT pin `rev` here. D2 (gaussian_job_shared) references
+# slurm-async-runner by the same URL without a `rev`; pinning a `rev` on
+# the direct reference makes cargo treat the two as distinct source
+# entries, duplicating `SlurmJobConfig` / `JobStatus` and silently
+# breaking the Pyclass Single Owner rule. Cargo.lock (committed) is the
+# canonical pin: to bump, run `cargo update -p <crate>` and commit
+# Cargo.lock in the same change. See CLAUDE.md "Upstream crates".
+gaussian_job_shared = { git = "https://github.com/kkiyama117/gaussian_job_shared.git", default-features = false }
+slurm_async_runner = { git = "https://github.com/kkiyama117/slurm-async-runner.git", default-features = false }
 
 # OPTIONAL pyo3 stack — unchanged from skeleton
 pyo3 = { version = "0.28", features = [
@@ -90,11 +93,11 @@ pyo3-stub-gen = { git = "https://github.com/kkiyama117/pyo3-stub-gen", rev = "a5
 ], optional = true }
 
 [dev-dependencies]
-tempfile = "3.10"
-rstest = "0.23"
-tokio = { version = "1.0", features = ["test-util"] }
-assert_cmd = "2.0"
-predicates = "3.0"
+tempfile = "3.27"
+rstest = "0.26.1"
+tokio = { version = "1.52", features = ["test-util"] }
+assert_cmd = "2.2"
+predicates = "3.1"
 
 [features]
 default = ["pyo3", "stub_gen"]
@@ -119,10 +122,3 @@ pyo3 = [
 ]
 
 stub_gen = ["pyo3"]
-
-# Resolve D2's git-sourced slurm_async_runner to our local path so the two
-# crates share a single compiled version. Without this, JobStatus from
-# `gaussian_job_shared::...` and the one we use directly are treated as
-# distinct types by cargo.
-[patch."https://github.com/kkiyama117/slurm-async-runner.git"]
-slurm_async_runner = { path = "../slurm-async-runner2" }

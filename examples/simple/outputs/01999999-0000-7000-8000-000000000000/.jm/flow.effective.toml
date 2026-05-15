@@ -1,0 +1,30 @@
+uuid = "01999999-0000-7000-8000-000000000000"
+created_at = "2026-05-15T00:00:00Z"
+
+[tags]
+example = "simple"
+
+[jobs.freq]
+program = "echo"
+body = """
+echo "[freq] flow=$JM_FLOW_UUID job=$JM_JOB_ID"
+sleep 2
+"""
+
+[jobs.freq.config]
+partition = "REPLACE_ME"
+
+[[jobs.freq.parents]]
+from = "opt"
+kind = "afterok"
+
+[jobs.opt]
+program = "echo"
+body = """
+echo "[opt] flow=$JM_FLOW_UUID job=$JM_JOB_ID"
+sleep 2
+"""
+parents = []
+
+[jobs.opt.config]
+partition = "REPLACE_ME"
