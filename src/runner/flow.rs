@@ -30,14 +30,20 @@ use slurm_async_runner::SbatchCmd;
 async fn async_write_job_run(path: PathBuf, run: JobRun) -> Result<(), JobManagerError> {
     tokio::task::spawn_blocking(move || write_job_run(&path, &run))
         .await
-        .map_err(|e| JobManagerError::Other(format!("write_job_run blocking task: {e}")))?
+        .map_err(|source| JobManagerError::JoinFailed {
+            op: "write_job_run",
+            source,
+        })?
 }
 
 /// Async counterpart to the synchronous `read_job_run`.
 async fn async_read_job_run(path: PathBuf) -> Result<JobRun, JobManagerError> {
     tokio::task::spawn_blocking(move || read_job_run(&path))
         .await
-        .map_err(|e| JobManagerError::Other(format!("read_job_run blocking task: {e}")))?
+        .map_err(|source| JobManagerError::JoinFailed {
+            op: "read_job_run",
+            source,
+        })?
 }
 
 /// Write `batch.bash` atomically: open a PID-suffixed tmp file in the
