@@ -3,7 +3,9 @@ name = "job_manager"
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "kkiyama117", email = "k.kiyama117@gmail.com" }]
+license = { file = "LICENSE" }
 classifiers = [
+  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
   "Programming Language :: Rust",
