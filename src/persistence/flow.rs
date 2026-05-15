@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use gaussian_job_shared::config::common::CommonConfig;
 use gaussian_job_shared::entities::workflow::{JobFlow, JobId};
 
 use crate::error::JobManagerError;
@@ -52,10 +53,23 @@ fn inject_partition_defaults(
     Ok(())
 }
 
-/// Read a `JobFlow` from a TOML file at `path`.
-pub fn read_flow(path: &Path) -> Result<JobFlow, JobManagerError> {
+/// Read a `JobFlow` from a TOML file at `path`, materializing it with
+/// `common` defaults (notably injecting `partition` from `common.slurm_default`
+/// when omitted in the flow.toml). Returns `PartitionMissing { job }` if any
+/// job lacks a partition and common has none either.
+pub fn read_flow(path: &Path, common: &CommonConfig) -> Result<JobFlow, JobManagerError> {
     let text = super::read_toml_string(path)?;
-    toml::from_str(&text).map_err(|source| JobManagerError::TomlParse {
+    let mut v: toml::Value = toml::from_str(&text).map_err(|source| JobManagerError::TomlParse {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let common_partition = if common.slurm_default.partition.is_empty() {
+        None
+    } else {
+        Some(common.slurm_default.partition.as_str())
+    };
+    inject_partition_defaults(&mut v, common_partition)?;
+    v.try_into().map_err(|source| JobManagerError::TomlParse {
         path: path.to_path_buf(),
         source,
     })
@@ -91,6 +105,29 @@ mod tests {
             mail_user: None,
             mail_types: None,
             resource_spec: None,
+        }
+    }
+
+    fn sample_common() -> gaussian_job_shared::config::common::CommonConfig {
+        use gaussian_job_shared::config::common::{CommonConfig, DirectoryConfig};
+        use std::path::PathBuf;
+        CommonConfig {
+            slurm_default: SlurmJobConfig {
+                partition: "long".to_string(),
+                time_limit: None,
+                log_stdout: None,
+                log_stderr: None,
+                comment: None,
+                job_name: None,
+                array_spec: None,
+                dependency: None,
+                mail_user: None,
+                mail_types: None,
+                resource_spec: None,
+            },
+            directories: DirectoryConfig {
+                project_root: PathBuf::from("/work"),
+            },
         }
     }
 
@@ -251,7 +288,7 @@ body = "true"
         let path = dir.path().join("flow.toml");
         let original = sample_flow();
         write_flow(&path, &original).unwrap();
-        let back = read_flow(&path).unwrap();
+        let back = read_flow(&path, &sample_common()).unwrap();
         assert_eq!(back.uuid, original.uuid);
         assert_eq!(back.jobs.len(), 2);
         assert!(back.jobs.contains_key(&JobId::from("g16")));
@@ -261,7 +298,7 @@ body = "true"
     fn read_missing_file_returns_io_error_with_path() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("does_not_exist.toml");
-        let err = read_flow(&path).unwrap_err();
+        let err = read_flow(&path, &sample_common()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("does_not_exist.toml"), "msg = {msg}");
     }

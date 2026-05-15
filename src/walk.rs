@@ -4,9 +4,11 @@
 //! tying up the async runtime threads.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_stream::stream;
 use futures::stream::{self, Stream, StreamExt};
+use gaussian_job_shared::config::common::CommonConfig;
 use gaussian_job_shared::entities::workflow::JobFlow;
 
 use crate::concurrency::parallelism;
@@ -42,6 +44,7 @@ fn candidate_paths(root: &Path) -> Result<Vec<PathBuf>, JobManagerError> {
 /// item `Err(JobManagerError::TomlParse{..})`.
 pub fn walk_flows(
     root: &Path,
+    common: Arc<CommonConfig>,
 ) -> impl Stream<Item = Result<JobFlow, JobManagerError>> + Send + 'static {
     let root = root.to_path_buf();
     let parallelism = parallelism();
@@ -54,10 +57,13 @@ pub fn walk_flows(
             }
         };
         let body = stream::iter(paths)
-            .map(|p| async move {
-                tokio::task::spawn_blocking(move || read_flow(&p))
-                    .await
-                    .map_err(|e| JobManagerError::Other(format!("spawn_blocking join: {e}")))?
+            .map(move |p| {
+                let common = Arc::clone(&common);
+                async move {
+                    tokio::task::spawn_blocking(move || read_flow(&p, &common))
+                        .await
+                        .map_err(|e| JobManagerError::Other(format!("spawn_blocking join: {e}")))?
+                }
             })
             .buffer_unordered(parallelism);
         let mut body = std::pin::pin!(body);
@@ -86,10 +92,34 @@ mod tests {
         }
     }
 
+    fn sample_common_arc() -> std::sync::Arc<gaussian_job_shared::config::common::CommonConfig> {
+        use gaussian_job_shared::config::common::{CommonConfig, DirectoryConfig};
+        use slurm_async_runner::entities::slurm::SlurmJobConfig;
+        use std::path::PathBuf;
+        std::sync::Arc::new(CommonConfig {
+            slurm_default: SlurmJobConfig {
+                partition: "long".to_string(),
+                time_limit: None,
+                log_stdout: None,
+                log_stderr: None,
+                comment: None,
+                job_name: None,
+                array_spec: None,
+                dependency: None,
+                mail_user: None,
+                mail_types: None,
+                resource_spec: None,
+            },
+            directories: DirectoryConfig {
+                project_root: PathBuf::from("/work"),
+            },
+        })
+    }
+
     #[tokio::test]
     async fn walk_empty_root_yields_nothing() {
         let dir = TempDir::new().unwrap();
-        let s = walk_flows(dir.path());
+        let s = walk_flows(dir.path(), sample_common_arc());
         let v: Vec<_> = s.collect().await;
         assert!(v.is_empty());
     }
@@ -105,7 +135,7 @@ mod tests {
             write_flow(&p, &f).unwrap();
             expected.push(u);
         }
-        let s = walk_flows(dir.path());
+        let s = walk_flows(dir.path(), sample_common_arc());
         let mut found: Vec<Uuid> = s
             .filter_map(|r| async move { r.ok().map(|f| f.uuid) })
             .collect()
@@ -120,7 +150,7 @@ mod tests {
     async fn walk_skips_dirs_with_no_flow_toml() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join("orphan")).unwrap();
-        let s = walk_flows(dir.path());
+        let s = walk_flows(dir.path(), sample_common_arc());
         let v: Vec<_> = s.collect().await;
         assert!(v.is_empty());
     }
@@ -131,7 +161,7 @@ mod tests {
         let bad = dir.path().join("badflow").join("flow.toml");
         std::fs::create_dir_all(bad.parent().unwrap()).unwrap();
         std::fs::write(&bad, "this = ::not valid toml::").unwrap();
-        let s = walk_flows(dir.path());
+        let s = walk_flows(dir.path(), sample_common_arc());
         let v: Vec<_> = s.collect().await;
         assert_eq!(v.len(), 1);
         assert!(v[0].is_err());
