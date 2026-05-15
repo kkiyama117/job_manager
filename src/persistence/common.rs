@@ -22,16 +22,15 @@ pub fn write_common(path: &Path, common: &CommonConfig) -> Result<(), JobManager
 }
 
 /// Merge `override_` on top of `common.slurm_default`.
-/// - Option<T>: override.or(common)
-/// - partition (String): override if non-empty, else common
+///
+/// Partition is **not** filled from common here — `read_flow`'s TOML
+/// preparse step (`inject_partition_defaults`) guarantees it is already
+/// materialized when this function runs. We simply forward `override_.partition`
+/// as-is. The other Option<T> fields fall back to common when None.
 pub fn merge_with_defaults(common: &CommonConfig, override_: &SlurmJobConfig) -> SlurmJobConfig {
     let base = &common.slurm_default;
     SlurmJobConfig {
-        partition: if override_.partition.is_empty() {
-            base.partition.clone()
-        } else {
-            override_.partition.clone()
-        },
+        partition: override_.partition.clone(),
         time_limit: override_.time_limit.or(base.time_limit),
         log_stdout: override_
             .log_stdout
@@ -115,7 +114,10 @@ mod tests {
     }
 
     #[test]
-    fn merge_uses_common_default_when_override_partition_is_empty() {
+    fn merge_preserves_explicit_empty_partition_in_override() {
+        // After F2, partition is materialized at read_flow time. By the time
+        // merge_with_defaults runs, partition is whatever read_flow put there.
+        // An explicit "" is preserved verbatim — sbatch will reject it.
         let common = sample();
         let override_cfg = SlurmJobConfig {
             partition: "".to_string(),
@@ -131,7 +133,7 @@ mod tests {
             resource_spec: None,
         };
         let merged = merge_with_defaults(&common, &override_cfg);
-        assert_eq!(merged.partition, "long");
+        assert_eq!(merged.partition, "");
     }
 
     #[test]
