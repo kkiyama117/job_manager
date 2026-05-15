@@ -98,6 +98,43 @@ pub fn write_flow(path: &Path, flow: &JobFlow) -> Result<(), JobManagerError> {
 /// `CommonConfig` — the snapshot has every default already baked in. If
 /// the file is absent, returns `SnapshotMissing` with a hint pointing the
 /// caller at `jm render <uuid>`.
+///
+/// # Examples
+///
+/// Round-trip a freshly-written snapshot:
+///
+/// ```
+/// use job_manager::{read_flow_effective, write_flow_effective};
+/// # use chrono::Utc;
+/// # use gaussian_job_shared::entities::workflow::JobFlow;
+/// # use std::collections::BTreeMap;
+/// # use tempfile::TempDir;
+/// # use uuid::Uuid;
+/// # let dir = TempDir::new().unwrap();
+/// let path = dir.path().join("flow.effective.toml");
+/// let flow = JobFlow {
+///     uuid: Uuid::now_v7(),
+///     created_at: Utc::now(),
+///     tags: BTreeMap::new(),
+///     jobs: BTreeMap::new(),
+/// };
+/// write_flow_effective(&path, &flow).unwrap();
+///
+/// let back = read_flow_effective(&path).unwrap();
+/// assert_eq!(back.uuid, flow.uuid);
+/// ```
+///
+/// A missing snapshot surfaces as `SnapshotMissing` (not a plain
+/// `Io::NotFound`) so callers can hint the user to run `jm render`:
+///
+/// ```
+/// use job_manager::{JobManagerError, read_flow_effective};
+/// # use tempfile::TempDir;
+/// # let dir = TempDir::new().unwrap();
+/// let absent = dir.path().join(".jm").join("flow.effective.toml");
+/// let err = read_flow_effective(&absent).unwrap_err();
+/// assert!(matches!(err, JobManagerError::SnapshotMissing { .. }));
+/// ```
 pub fn read_flow_effective(path: &Path) -> Result<JobFlow, JobManagerError> {
     if !path.exists() {
         // Expected layout is `<root>/<uuid>/.jm/flow.effective.toml`, so the
@@ -127,6 +164,29 @@ pub fn read_flow_effective(path: &Path) -> Result<JobFlow, JobManagerError> {
 
 /// Write a materialized snapshot atomically. Creates `<flow_dir>/.jm/`
 /// (and intermediate dirs) if missing.
+///
+/// # Examples
+///
+/// ```
+/// use job_manager::{read_flow_effective, write_flow_effective};
+/// # use chrono::Utc;
+/// # use gaussian_job_shared::entities::workflow::JobFlow;
+/// # use std::collections::BTreeMap;
+/// # use tempfile::TempDir;
+/// # use uuid::Uuid;
+/// # let dir = TempDir::new().unwrap();
+/// // Parent `.jm/` directory is created on demand.
+/// let path = dir.path().join(".jm").join("flow.effective.toml");
+/// let flow = JobFlow {
+///     uuid: Uuid::now_v7(),
+///     created_at: Utc::now(),
+///     tags: BTreeMap::new(),
+///     jobs: BTreeMap::new(),
+/// };
+/// write_flow_effective(&path, &flow).unwrap();
+/// assert!(path.exists());
+/// assert_eq!(read_flow_effective(&path).unwrap().uuid, flow.uuid);
+/// ```
 pub fn write_flow_effective(path: &Path, flow: &JobFlow) -> Result<(), JobManagerError> {
     let body = toml::to_string_pretty(flow)?;
     super::atomic_write(path, body.as_bytes())

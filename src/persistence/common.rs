@@ -25,6 +25,17 @@ pub fn write_common(path: &Path, common: &CommonConfig) -> Result<(), JobManager
 /// `project_root`. Used by call sites that need a CommonConfig but the user
 /// didn't supply a `common.toml` — `read_flow` then expects every job to
 /// carry its own `partition` (otherwise `PartitionMissing` surfaces).
+///
+/// # Examples
+///
+/// ```
+/// use job_manager::synth_empty_common;
+///
+/// let common = synth_empty_common();
+/// // `partition` is empty by design — every job must supply its own
+/// // (otherwise `read_flow` returns `JobManagerError::PartitionMissing`).
+/// assert!(common.slurm_default.partition.is_empty());
+/// ```
 pub fn synth_empty_common() -> CommonConfig {
     use gaussian_job_shared::config::common::DirectoryConfig;
     CommonConfig {
