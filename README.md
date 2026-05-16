@@ -188,6 +188,10 @@ This mirrors Airflow's `default_args` inheritance and Prefect's Work Pool `base_
 ### 1. From the shell (`jm`)
 
 ```bash
+# scaffold flow.toml + plan.toml under a fresh uuid
+jm --root /work new
+jm --root /work new --tag program=g16 --tag basis=6-31g    # attach key=value tags; --print-path prints the dir instead of the uuid
+
 # render every batch.bash + write .jm/flow.effective.toml snapshot
 jm --root /work render <flow_uuid>
 
