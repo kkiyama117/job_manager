@@ -267,7 +267,9 @@ cargo build --bin jm --no-default-features
 ./target/debug/jm --root /work submit <flow_uuid> --dry-run
 ./target/debug/jm --root /work tick   <flow_uuid>
 ./target/debug/jm --root /work show   <flow_uuid>
-./target/debug/jm --root /work search --program g16
+./target/debug/jm --root /work ls jobs --program g16
+./target/debug/jm --root /work ls flows
+./target/debug/jm --root /work ls tree <flow_uuid>
 ```
 
 `--root <path>` or `JM_ROOT=<path>` is required for every subcommand.

@@ -44,6 +44,40 @@ flow, lifecycle authority split, Pyclass Single Owner rule) see
 | Post-walk filter | `search::{SearchFilter, matches}` | `SearchFilter` |
 | Per-Job facade | `view::CalcView` | `CalcView` |
 
+`SearchFilter.status` (Rust): `BTreeSet<DisplayLifecycle>` (was `Option<Lifecycle>`).
+`SearchFilter.status` (Python): `list[str]` — accepts short codes or long names, case-insensitive. Valid tokens: `pd`/`pending`, `q`/`queued`, `r`/`running`, `ok`/`success`, `f`/`failed`, `sk`/`skipped`.
+
+## Listing
+
+These are Rust-only (not exposed to Python).
+
+Read-only cross-flow projection and formatting for `jm ls`. No SLURM contact — call `jm tick` first to reconcile state. All symbols are re-exported from `lib.rs`.
+
+| Surface | Rust | Purpose |
+|---|---|---|
+| Walk + read all job statuses | `listing::collect(root, common, filter) → Vec<CollectedFlow>` | Async; missing/unreadable `status.toml` → Pending |
+| Project to per-job rows | `listing::job_rows(collected, filter, limit)` | Filter + flatten; newest-flow-first × topo job order |
+| Project to per-flow rows | `listing::flow_rows(collected, filter, limit)` | Aggregated status per flow |
+| Flows where any job passes filter | `listing::matched_flows(collected, filter, limit)` | Used by `ls tree` and `ls flows` |
+| Table formatter — jobs | `listing::format_jobs_table(rows, no_header)` | Aligned columns: FLOW JOB ST SLURM_ID PROGRAM UPDATED CREATED |
+| Table formatter — flows | `listing::format_flows_table(rows, no_header)` | Aligned columns: FLOW TOTAL DONE STATUS CREATED |
+| JSON formatter — jobs | `listing::format_jobs_json(rows)` | Pretty JSON array; full UUID, long status names |
+| JSON formatter — flows | `listing::format_flows_json(rows)` | Pretty JSON array; full UUID |
+| Tree formatter | `listing::format_tree(flows)` | Forest of flow→job trees; topological order; parent-edge annotations |
+| Rolled-up flow status | `listing::aggregate_flow_status(jobs)` | Priority: FAILED > RUNNING > QUEUED > DONE > PARTIAL > PENDING |
+| Display-time lifecycle | `listing::DisplayLifecycle` | 6 values including Pending (no `status.toml`) |
+
+`DisplayLifecycle` code / long name mapping:
+
+| Code | Long name |
+|---|---|
+| `PD` | `pending` |
+| `Q` | `queued` |
+| `R` | `running` |
+| `OK` | `success` |
+| `F` | `failed` |
+| `SK` | `skipped` |
+
 ## Helpers (SP-2)
 
 | Surface | Rust | Python |

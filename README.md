@@ -116,7 +116,7 @@ install -m 0755 target/release/jm /usr/local/bin/jm    # or ~/.local/bin/jm
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `JM_ROOT` | — | Fallback for `jm --root <path>`. Required (one or the other) on **every** subcommand including `search`. |
+| `JM_ROOT` | — | Fallback for `jm --root <path>`. Required (one or the other) on **every** subcommand including `ls`. |
 | `JOB_MANAGER_PARALLELISM` | `32` | `buffer_unordered` width inside `walk_flows`. Lower it to constrain FD load on huge `<root>` directories. |
 
 ---
@@ -208,14 +208,16 @@ jm --root /work tick <flow_uuid>
 # inspect the flow + per-job lifecycle (snapshot-driven)
 jm --root /work show <flow_uuid>
 
-# cross-flow search across <root>/*/flow.toml
-jm --root /work search --program g16
+# cross-flow listing — read-only (no SLURM contact); run `jm tick` first to reconcile state
+jm --root /work ls jobs --program g16 --status running,failed
+jm --root /work ls flows
+jm --root /work ls tree <flow_uuid>
 
 # validate TOML + structure
 jm --root /work doctor [<flow_uuid>]
 ```
 
-`--root <path>` is required for every subcommand (including `search`); `JM_ROOT=<path>` works as a fallback. Paths are canonicalized at entry (`..` and symlinks resolved). `<flow_uuid>` is a bare UUID string or an absolute path whose last component is the UUID.
+`--root <path>` is required for every subcommand (including `ls`); `JM_ROOT=<path>` works as a fallback. Paths are canonicalized at entry (`..` and symlinks resolved). `<flow_uuid>` is a bare UUID string or an absolute path whose last component is the UUID.
 
 ### 2. From Python (async)
 
@@ -301,6 +303,8 @@ flow = read_flow_effective(resolver.flow_effective_toml("01997cdc-..."))
 
 `SearchFilter` is a post-walk predicate — filter by `program` / `tags` / `status` / `flow_uuid_prefix` / `created_after` / `created_before` / `slurm_jobid` / `job_id`.
 
+`SearchFilter.status` accepts a list of short codes or long names (`"pd"`, `"q"`, `"r"`, `"ok"`, `"f"`, `"sk"` / `"pending"`, `"queued"`, `"running"`, `"success"`, `"failed"`, `"skipped"`).
+
 ```python
 import asyncio, job_manager
 
@@ -308,7 +312,7 @@ async def find_g16_failures():
     flows = await job_manager.walk_flows("/work")
     f = job_manager.SearchFilter(
         program="g16",
-        status=job_manager.Lifecycle.Failed,
+        status=["failed"],
     )
     return flows, f
 ```
@@ -350,6 +354,7 @@ The full surface — every Rust function and PyO3 export, plus the TOML file sch
 | **Persistence** | `PathResolver`, `read_flow`, `read_flow_effective`, `write_plan`, `write_status` | Single source of truth for on-disk paths; atomic-rename TOML I/O |
 | **Plan helpers** | `build_job_id`, `validate_step_id`, `validate_job_id`, `ExperimentPlan` | Compose `JobId`s, reject reserved names / unsafe characters / path traversal |
 | **Search** | `walk_flows`, `SearchFilter`, `CalcView` | Cross-flow discovery, per-job facade |
+| **Listing** | `collect`, `job_rows`, `flow_rows`, `matched_flows`, `format_jobs_table`, `format_flows_table`, `format_jobs_json`, `format_flows_json`, `format_tree`, `aggregate_flow_status`, `DisplayLifecycle` | Read-only cross-flow projection / formatting for `jm ls` |
 | **Transition (pure)** | `decide_transition`, `Decision` | The only writer of `Success` / `Failed` / `Skipped` |
 
 Python types are also exposed via a generated stub (`python/job_manager/_job_manager_core/*.pyi`). Regenerate after editing `py_export/`:
