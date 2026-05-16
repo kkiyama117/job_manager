@@ -315,6 +315,9 @@ details like `OUT_OF_MEMORY/OutOfMemory` when explaining a failure.
 
 ## `.status.toml` schema
 
+> Consolidated TOML format reference (all five files):
+> [toml-reference.md](toml-reference.md).
+
 ```toml
 lifecycle = "queued"          # snake_case: queued | running | success | failed | skipped
 updated_at = "2026-05-13T12:34:56Z"
