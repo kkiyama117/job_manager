@@ -247,3 +247,50 @@ async fn cmd_search(root: &std::path::Path, program: Option<&str>) -> anyhow::Re
     }
     Ok(())
 }
+
+/// Split a `--tag KEY=VALUE` argument on the first `=`. The value may
+/// itself contain `=`. Empty keys are rejected so a stray `=v` cannot
+/// produce an unnamed tag.
+#[cfg_attr(not(test), allow(dead_code))]
+fn parse_tag(raw: &str) -> anyhow::Result<(String, String)> {
+    match raw.split_once('=') {
+        Some(("", _)) => {
+            anyhow::bail!("invalid --tag: empty key in {raw:?}")
+        }
+        Some((k, v)) => Ok((k.to_string(), v.to_string())),
+        None => anyhow::bail!("invalid --tag: expected key=value, got {raw:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_tag_splits_on_first_equals() {
+        assert_eq!(
+            parse_tag("a=b").unwrap(),
+            ("a".to_string(), "b".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_tag_keeps_later_equals_in_value() {
+        assert_eq!(
+            parse_tag("a=b=c").unwrap(),
+            ("a".to_string(), "b=c".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_tag_rejects_missing_equals() {
+        let err = parse_tag("abc").unwrap_err();
+        assert!(err.to_string().contains("expected key=value"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_tag_rejects_empty_key() {
+        let err = parse_tag("=v").unwrap_err();
+        assert!(err.to_string().contains("empty key"), "got: {err}");
+    }
+}
