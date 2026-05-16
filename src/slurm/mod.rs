@@ -4,6 +4,7 @@
 
 pub mod dependency;
 pub mod executor;
+pub mod logpath;
 pub mod querier;
 
 pub use executor::{DryRunExecutor, Executor, MockExecutor, SbatchExecutor};

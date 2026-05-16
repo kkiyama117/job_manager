@@ -11,7 +11,7 @@
 //! restructuring. None are implemented now (YAGNI per spec).
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 
 use gaussian_job_shared::config::common::CommonConfig;
@@ -181,23 +181,6 @@ pub fn check_plan_coverage(flow_dir: &Path, flow: &JobFlow) -> Vec<Finding> {
     out
 }
 
-/// Deepest ancestor of `p`'s parent directory that contains no `%`
-/// (SLURM filename token) component. `sbatch` expands `%x`/`%j` only when
-/// it creates the file, so only the token-free prefix is a real directory
-/// doctor can stat. Examples: `/a/b/logs/%x.%j.out` → `/a/b/logs`;
-/// `/a/%j/x.out` → `/a`; `x.out` → `""`.
-fn token_free_log_dir(p: &Path) -> PathBuf {
-    let parent = p.parent().unwrap_or_else(|| Path::new(""));
-    let mut acc = PathBuf::new();
-    for comp in parent.components() {
-        if comp.as_os_str().to_string_lossy().contains('%') {
-            break;
-        }
-        acc.push(comp);
-    }
-    acc
-}
-
 /// `log_stdout`/`log_stderr` must resolve into a directory that already
 /// exists: `sbatch` does **not** create the `--output`/`--error` parent
 /// directory, so a missing one makes SLURM fail to open the file and the
@@ -205,11 +188,10 @@ fn token_free_log_dir(p: &Path) -> PathBuf {
 /// reason. The merged (common + per-job) value is what reaches `sbatch`,
 /// so we evaluate exactly that via `merge_with_defaults`.
 ///
-/// Always WARN, never FAIL — `jm doctor` stays advisory here. A relative
-/// log path is resolved against `<root>` (the most stable reference
-/// doctor has; sbatch itself would resolve it against the `jm submit`
-/// cwd, which doctor cannot know) and its existence is always checked —
-/// there is no "unverifiable" escape.
+/// Always WARN, never FAIL — `jm doctor` stays advisory here. Path
+/// resolution (relative → `<root>`, `%x`/`%j` token stripping) is shared
+/// with the `jm submit` fail-fast preflight via
+/// [`crate::slurm::logpath::missing_log_dirs`], so the two never drift.
 pub fn check_log_dirs_exist(
     root: &Path,
     flow_dir: &Path,
@@ -220,36 +202,17 @@ pub fn check_log_dirs_exist(
     let mut out = Vec::new();
     for (jid, job) in &flow.jobs {
         let merged = merge_with_defaults(common, &job.spec.config);
-        for (field, val) in [
-            ("log_stdout", merged.log_stdout.as_deref()),
-            ("log_stderr", merged.log_stderr.as_deref()),
-        ] {
-            let Some(p) = val else { continue };
-            let dir = token_free_log_dir(p);
-            // Filename only (no directory component) → the file lands
-            // directly in the resolution base, which exists.
-            if dir.as_os_str().is_empty() {
-                continue;
-            }
-            // Relative log dirs are resolved against <root>; absolute
-            // ones stand on their own. Either way, existence is checked.
-            let resolved = if dir.is_absolute() {
-                dir.clone()
-            } else {
-                root.join(&dir)
-            };
-            if !resolved.exists() {
-                out.push(Finding::warn(
-                    &path,
-                    format!(
-                        "job {:?}: {field} parent dir {} does not exist. sbatch does \
-                         not create it; SLURM will fail the job before it runs. \
-                         `mkdir -p` it or fix the path.",
-                        jid.0,
-                        resolved.display(),
-                    ),
-                ));
-            }
+        for (field, dir) in crate::slurm::logpath::missing_log_dirs(root, &merged) {
+            out.push(Finding::warn(
+                &path,
+                format!(
+                    "job {:?}: {field} parent dir {} does not exist. sbatch does \
+                     not create it; SLURM will fail the job before it runs. \
+                     `mkdir -p` it or fix the path.",
+                    jid.0,
+                    dir.display(),
+                ),
+            ));
         }
     }
     if out.is_empty() {

@@ -107,6 +107,15 @@ pub enum JobManagerError {
     },
 
     #[error(
+        "log directory does not exist: job={job} {field} resolves to {dir}, which sbatch will NOT create — SLURM would fail the job opaquely. Run `mkdir -p {dir}` or fix the path in flow.toml / common.toml."
+    )]
+    LogDirMissing {
+        job: gaussian_job_shared::entities::workflow::JobId,
+        field: &'static str,
+        dir: PathBuf,
+    },
+
+    #[error(
         "effective snapshot missing at {path} (uuid={uuid}): run `jm render <uuid>` first to materialize"
     )]
     SnapshotMissing { path: PathBuf, uuid: String },
