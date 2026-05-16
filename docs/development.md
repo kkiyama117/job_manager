@@ -105,6 +105,9 @@ cargo test --all-features && uv run pytest python/tests -v
   must complete in under 1s.
 - `tests/integration_sp3.rs` — end-to-end `FlowRunner` exercise via
   `MockExecutor` + `InMemoryQuerier`.
+- `cargo test --test doctor_examples` — drift-guards `examples/full/`
+  (runs `jm doctor` logic over it). Also runnable as
+  `cargo run --bin jm --no-default-features -- --root examples/full doctor`.
 - `python/tests/test_python_api.py` — Python-side async smoke tests
   (`submit_flow`, `walk_flows`).
 - `python/tests/test_plan.py`, `test_jobid.py`, ... — per-module

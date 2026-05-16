@@ -206,6 +206,9 @@ jm --root /work show <flow_uuid>
 
 # cross-flow search across <root>/*/flow.toml
 jm --root /work search --program g16
+
+# validate TOML + structure
+jm --root /work doctor [<flow_uuid>]
 ```
 
 `--root <path>` is required for every subcommand (including `search`); `JM_ROOT=<path>` works as a fallback. Paths are canonicalized at entry (`..` and symlinks resolved). `<flow_uuid>` is a bare UUID string or an absolute path whose last component is the UUID.
@@ -381,6 +384,7 @@ For deeper architectural background:
 
 - [`docs/architecture.md`](./docs/architecture.md) — module map, on-disk layout, data flow, lifecycle model, **Pyclass Single Owner rule**.
 - [`docs/references/orchestration-systems.md`](./docs/references/orchestration-systems.md) — Airflow / Prefect vocabulary alignment.
+- [`docs/toml-reference.md`](./docs/toml-reference.md) — every TOML file's format, field by field
 
 ---
 
