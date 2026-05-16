@@ -10,13 +10,16 @@
 //! `report.extend(checks::check_*(..))` line in `run_doctor` — no
 //! restructuring. None are implemented now (YAGNI per spec).
 
+use std::collections::BTreeSet;
 use std::path::Path;
+use std::str::FromStr;
 
 use gaussian_job_shared::config::common::CommonConfig;
 use gaussian_job_shared::entities::workflow::JobFlow;
 
 use crate::error::JobManagerError;
 use crate::persistence::{read_flow, read_flow_effective, read_job_run, read_plan};
+use crate::plan::ExperimentPlan;
 
 use super::report::Finding;
 
@@ -85,6 +88,93 @@ pub fn check_status_files<'a>(
             Ok(_) => out.push(Finding::pass(&path, "status.toml parses as JobRun")),
             Err(e) => out.push(Finding::fail(&path, err_msg(&e))),
         }
+    }
+    out
+}
+
+/// `flow.toml`'s `uuid` must equal the flow directory name. FAIL on a
+/// mismatch or a non-UUID directory name.
+pub fn check_uuid_matches_dir(flow_dir: &Path, flow: &JobFlow) -> Vec<Finding> {
+    let path = flow_dir.join("flow.toml");
+    let dir_name = flow_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("<non-utf8>");
+    match uuid::Uuid::from_str(dir_name) {
+        Ok(dir_uuid) if dir_uuid == flow.uuid => vec![Finding::pass(
+            &path,
+            format!("uuid matches directory name ({dir_uuid})"),
+        )],
+        Ok(dir_uuid) => vec![Finding::fail(
+            &path,
+            format!(
+                "uuid {} does not match directory name {dir_uuid}",
+                flow.uuid
+            ),
+        )],
+        Err(_) => vec![Finding::fail(
+            &path,
+            format!("flow directory name {dir_name:?} is not a valid UUID"),
+        )],
+    }
+}
+
+/// Every `JobEdge.from` must reference a job key that exists in
+/// `flow.jobs`. FAIL on a dangling parent.
+pub fn check_parents_resolve(flow_dir: &Path, flow: &JobFlow) -> Vec<Finding> {
+    let path = flow_dir.join("flow.toml");
+    let mut out = Vec::new();
+    for (jid, job) in &flow.jobs {
+        for edge in &job.parents {
+            if !flow.jobs.contains_key(&edge.from) {
+                out.push(Finding::fail(
+                    &path,
+                    format!(
+                        "job {:?} has parent {:?} which is not a job in this flow",
+                        jid.0, edge.from.0
+                    ),
+                ));
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push(Finding::pass(&path, "all parent edges resolve"));
+    }
+    out
+}
+
+/// `plan.toml`'s job set should cover `flow.toml`'s job set. WARN (not
+/// FAIL) on missing/extra entries — an empty plan table is allowed by
+/// existing convention, so this is advisory. Returns nothing when
+/// plan.toml is absent or unparsable (`check_plan` already FAILed).
+pub fn check_plan_coverage(flow_dir: &Path, flow: &JobFlow) -> Vec<Finding> {
+    let path = flow_dir.join("plan.toml");
+    if !path.exists() {
+        return Vec::new();
+    }
+    let plan: ExperimentPlan = match read_plan(&path) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    let flow_jobs: BTreeSet<&String> = flow.jobs.keys().map(|j| &j.0).collect();
+    let plan_jobs: BTreeSet<&String> = plan.jobs.keys().map(|j| &j.0).collect();
+    let missing: Vec<&&String> = flow_jobs.difference(&plan_jobs).collect();
+    let extra: Vec<&&String> = plan_jobs.difference(&flow_jobs).collect();
+    let mut out = Vec::new();
+    if !missing.is_empty() {
+        out.push(Finding::warn(
+            &path,
+            format!("plan has no entry for flow jobs: {missing:?}"),
+        ));
+    }
+    if !extra.is_empty() {
+        out.push(Finding::warn(
+            &path,
+            format!("plan has entries for unknown jobs: {extra:?}"),
+        ));
+    }
+    if out.is_empty() {
+        out.push(Finding::pass(&path, "plan covers exactly the flow's jobs"));
     }
     out
 }
@@ -173,5 +263,60 @@ body = "x\n"
         std::fs::write(sp.join("status.toml"), "lifecycle = \"bogus\"\n").unwrap();
         let fs = check_status_files(d.path(), ["opt"]);
         assert_eq!(fs[0].severity, Severity::Fail);
+    }
+
+    fn write_flow_with(d: &Path, body: &str) -> JobFlow {
+        std::fs::write(d.join("flow.toml"), body).unwrap();
+        let (f, _) = check_flow(d, &synth_empty_common());
+        f.expect("fixture flow should parse")
+    }
+
+    #[test]
+    fn uuid_match_pass_and_fail() {
+        let d = tempdir().unwrap();
+        let good = d.path().join("01999999-0000-7000-8000-000000000000");
+        std::fs::create_dir_all(&good).unwrap();
+        let flow = write_flow_with(&good, GOOD_FLOW);
+        assert_eq!(
+            check_uuid_matches_dir(&good, &flow)[0].severity,
+            Severity::Pass
+        );
+
+        let bad = d.path().join("not-a-uuid");
+        std::fs::create_dir_all(&bad).unwrap();
+        let flow2 = write_flow_with(&bad, GOOD_FLOW);
+        assert_eq!(
+            check_uuid_matches_dir(&bad, &flow2)[0].severity,
+            Severity::Fail
+        );
+    }
+
+    #[test]
+    fn dangling_parent_is_fail() {
+        let d = tempdir().unwrap();
+        let f = r#"
+uuid = "01999999-0000-7000-8000-000000000000"
+created_at = "2026-05-15T00:00:00Z"
+[jobs.freq]
+program = "echo"
+body = "x\n"
+[jobs.freq.config]
+partition = "long"
+[[jobs.freq.parents]]
+from = "ghost"
+kind = "afterok"
+"#;
+        let flow = write_flow_with(d.path(), f);
+        let fs = check_parents_resolve(d.path(), &flow);
+        assert_eq!(fs[0].severity, Severity::Fail);
+    }
+
+    #[test]
+    fn plan_coverage_warns_on_missing_entry() {
+        let d = tempdir().unwrap();
+        let flow = write_flow_with(d.path(), GOOD_FLOW); // job: opt
+        std::fs::write(d.path().join("plan.toml"), "[jobs.other]\nx=1\n").unwrap();
+        let fs = check_plan_coverage(d.path(), &flow);
+        assert!(fs.iter().any(|f| f.severity == Severity::Warn));
     }
 }
