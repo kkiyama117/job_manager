@@ -38,6 +38,8 @@ enum Cmd {
         #[arg(long)]
         program: Option<String>,
     },
+    /// Validate TOML files + structural invariants under --root.
+    Doctor { target: Option<String> },
 }
 
 #[tokio::main]
@@ -69,6 +71,10 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Search { ref program } => {
             let root = resolve_root(&cli)?;
             cmd_search(&root, program.as_deref()).await
+        }
+        Cmd::Doctor { ref target } => {
+            let root = resolve_root(&cli)?;
+            cmd_doctor(&root, target.as_deref()).await
         }
     }
 }
@@ -213,6 +219,24 @@ async fn cmd_tick(root: &std::path::Path, target: &str) -> anyhow::Result<()> {
         "tick complete: {} transitions evaluated",
         result.transitions.len()
     );
+    Ok(())
+}
+
+async fn cmd_doctor(root: &std::path::Path, target: Option<&str>) -> anyhow::Result<()> {
+    use job_manager::doctor::{DoctorScope, run_doctor};
+
+    let scope = match target {
+        Some(t) => DoctorScope::Flow(parse_target(root, t)?),
+        None => DoctorScope::All,
+    };
+    let report = run_doctor(root, &scope)?;
+    print!("{report}");
+    if report.has_fail() {
+        anyhow::bail!(
+            "doctor found {} error(s)",
+            report.count(job_manager::Severity::Fail)
+        );
+    }
     Ok(())
 }
 
