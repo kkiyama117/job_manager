@@ -346,6 +346,35 @@ partition = \"REPLACE_ME\"
     )
 }
 
+/// Atomic write for `jm new`'s generated files. `persistence::atomic_write`
+/// is `pub(crate)` and unreachable from this binary crate, so this is a
+/// minimal local equivalent: write to a `<filename>.<pid>.tmp` sibling,
+/// fsync, rename over `path`, and clean the tmp on failure. `jm new` never
+/// writes the same path concurrently, so PID alone is a sufficient tmp
+/// discriminator. The tmp name is built by *appending* (not
+/// `Path::with_extension`, which would replace `.toml` and produce
+/// `flow.<pid>.tmp`), matching the CLAUDE.md `<name>.<pid>.tmp` convention.
+#[cfg_attr(not(test), allow(dead_code))]
+fn atomic_write_str(path: &std::path::Path, body: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut tmp_name = path
+        .file_name()
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
+        })?
+        .to_os_string();
+    tmp_name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = path.with_file_name(tmp_name);
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,5 +477,22 @@ mod tests {
 
         assert_eq!(flow.tags.get("env").map(String::as_str), Some("prod"));
         assert_eq!(flow.tags.get("owner").map(String::as_str), Some("a=b"));
+    }
+
+    #[test]
+    fn atomic_write_str_creates_file_with_exact_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.toml");
+
+        atomic_write_str(&path, "hello = 1\n").expect("write ok");
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello = 1\n");
+        // No leftover .tmp sibling.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "tmp file not cleaned: {leftovers:?}");
     }
 }
