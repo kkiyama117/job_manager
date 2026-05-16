@@ -318,12 +318,23 @@ async fn cmd_new(root: &std::path::Path, tags: &[String], print_path: bool) -> a
 }
 
 /// Split a `--tag KEY=VALUE` argument on the first `=`. The value may
-/// itself contain `=`. Empty keys are rejected so a stray `=v` cannot
-/// produce an unnamed tag.
+/// itself contain `=`. The key must be a TOML bare key
+/// (`[A-Za-z0-9_-]`, non-empty) so it can be written into `flow.toml`'s
+/// `[tags]` table without quoting; this fails fast here rather than as a
+/// cryptic `jm render` TOML error later.
 fn parse_tag(raw: &str) -> anyhow::Result<(String, String)> {
     match raw.split_once('=') {
         Some(("", _)) => {
             anyhow::bail!("invalid --tag: empty key in {raw:?}")
+        }
+        Some((k, _))
+            if !k
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') =>
+        {
+            anyhow::bail!(
+                "invalid --tag: key {k:?} has non-bare-key characters (only A-Za-z0-9_- allowed)"
+            )
         }
         Some((k, v)) => Ok((k.to_string(), v.to_string())),
         None => anyhow::bail!("invalid --tag: expected key=value, got {raw:?}"),
@@ -469,6 +480,17 @@ mod tests {
     fn parse_tag_rejects_empty_key() {
         let err = parse_tag("=v").unwrap_err();
         assert!(err.to_string().contains("empty key"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_tag_rejects_non_bare_key() {
+        for bad in ["my key=v", "my.key=v", "k!=v"] {
+            let err = parse_tag(bad).unwrap_err();
+            assert!(
+                err.to_string().contains("non-bare-key"),
+                "got: {err} for {bad:?}"
+            );
+        }
     }
 
     #[test]
