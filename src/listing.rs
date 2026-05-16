@@ -1,8 +1,15 @@
 //! `jm ls` — pure projection/aggregation/formatting for cross-flow listing.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+use chrono::{DateTime, Utc};
+use gaussian_job_shared::entities::workflow::{JobFlow, JobId};
+use serde::Serialize;
+use uuid::Uuid;
 
 use crate::job::lifecycle::Lifecycle;
+use crate::job::run::JobRun;
+use crate::persistence::path::PathResolver;
 
 /// Display-time lifecycle: the 5 `Lifecycle` values plus `Pending`
 /// (no `status.toml` on disk — not a real enum value).
@@ -68,6 +75,157 @@ pub fn parse_status_set(csv: &str) -> Result<BTreeSet<DisplayLifecycle>, String>
     Ok(out)
 }
 
+/// One flow + its on-disk per-job status (`None` == Pending: no readable
+/// `status.toml`). Produced by `collect` (added in a later task).
+#[derive(Debug)]
+pub struct CollectedFlow {
+    pub flow: JobFlow,
+    pub statuses: BTreeMap<JobId, Option<JobRun>>,
+}
+
+impl CollectedFlow {
+    /// `DisplayLifecycle` for one job (`Pending` if no status).
+    pub fn job_display(&self, job_id: &JobId) -> DisplayLifecycle {
+        match self.statuses.get(job_id).and_then(|o| o.as_ref()) {
+            Some(jr) => DisplayLifecycle::Real(jr.lifecycle),
+            None => DisplayLifecycle::Pending,
+        }
+    }
+}
+
+/// Rolled-up flow status (priority order is fixed; see spec §5.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowStatus {
+    Failed,
+    Running,
+    Queued,
+    Done,
+    Partial,
+    Pending,
+}
+
+impl FlowStatus {
+    /// UPPERCASE label for the flow STATUS column and `--json` output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FlowStatus::Failed => "FAILED",
+            FlowStatus::Running => "RUNNING",
+            FlowStatus::Queued => "QUEUED",
+            FlowStatus::Done => "DONE",
+            FlowStatus::Partial => "PARTIAL",
+            FlowStatus::Pending => "PENDING",
+        }
+    }
+}
+
+/// Aggregate a flow's per-job displays into one rolled-up status.
+/// Priority: FAILED > RUNNING > QUEUED > DONE(all success) > PARTIAL
+/// (>=1 skipped, all terminal) > PENDING (anything else / empty).
+pub fn aggregate_flow_status(jobs: &[DisplayLifecycle]) -> FlowStatus {
+    use crate::job::lifecycle::Lifecycle::{Failed, Queued, Running, Skipped, Success};
+    if jobs.is_empty() {
+        return FlowStatus::Pending;
+    }
+    if jobs.contains(&DisplayLifecycle::Real(Failed)) {
+        return FlowStatus::Failed;
+    }
+    if jobs.contains(&DisplayLifecycle::Real(Running)) {
+        return FlowStatus::Running;
+    }
+    if jobs.contains(&DisplayLifecycle::Real(Queued)) {
+        return FlowStatus::Queued;
+    }
+    if jobs.iter().all(|d| *d == DisplayLifecycle::Real(Success)) {
+        return FlowStatus::Done;
+    }
+    let any_skipped = jobs.contains(&DisplayLifecycle::Real(Skipped));
+    let all_terminal = jobs.iter().all(|d| {
+        matches!(
+            d,
+            DisplayLifecycle::Real(Success) | DisplayLifecycle::Real(Skipped)
+        )
+    });
+    if any_skipped && all_terminal {
+        FlowStatus::Partial
+    } else {
+        FlowStatus::Pending
+    }
+}
+
+/// In-memory job row (canonical data; display/JSON views derived).
+#[derive(Debug, Clone)]
+pub struct JobRow {
+    pub flow_uuid: Uuid,
+    pub job_id: String,
+    pub status: DisplayLifecycle,
+    pub slurm_jobid: Option<u64>,
+    pub program: String,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// In-memory flow row.
+#[derive(Debug, Clone)]
+pub struct FlowRow {
+    pub flow_uuid: Uuid,
+    pub total: usize,
+    pub done: usize,
+    pub status: FlowStatus,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `--json` view for a job row (full uuid, long status, RFC3339 times).
+#[derive(Serialize)]
+pub struct JobRowJson {
+    pub flow: String,
+    pub job: String,
+    pub status: String,
+    pub slurm_jobid: Option<u64>,
+    pub program: String,
+    pub updated_at: Option<String>,
+    pub created_at: String,
+}
+
+impl From<&JobRow> for JobRowJson {
+    fn from(r: &JobRow) -> Self {
+        JobRowJson {
+            flow: r.flow_uuid.to_string(),
+            job: r.job_id.clone(),
+            status: r.status.long().to_string(),
+            slurm_jobid: r.slurm_jobid,
+            program: r.program.clone(),
+            updated_at: r.updated_at.map(|t| t.to_rfc3339()),
+            created_at: r.created_at.to_rfc3339(),
+        }
+    }
+}
+
+/// `--json` view for a flow row.
+#[derive(Serialize)]
+pub struct FlowRowJson {
+    pub flow: String,
+    pub total: usize,
+    pub done: usize,
+    pub status: String,
+    pub created_at: String,
+}
+
+impl From<&FlowRow> for FlowRowJson {
+    fn from(r: &FlowRow) -> Self {
+        FlowRowJson {
+            flow: r.flow_uuid.to_string(),
+            total: r.total,
+            done: r.done,
+            status: r.status.as_str().to_string(),
+            created_at: r.created_at.to_rfc3339(),
+        }
+    }
+}
+
+// Keeps the `PathResolver` import live until Task 6 wires `collect`.
+#[allow(unused_imports)]
+use PathResolver as _PathResolverProbe;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +281,26 @@ mod tests {
     #[test]
     fn parse_status_set_propagates_token_error() {
         assert!(parse_status_set("running,nope").is_err());
+    }
+
+    fn dl(l: Lifecycle) -> DisplayLifecycle {
+        DisplayLifecycle::Real(l)
+    }
+
+    #[rstest]
+    #[case(vec![], FlowStatus::Pending)]
+    #[case(vec![dl(Lifecycle::Success), dl(Lifecycle::Failed)], FlowStatus::Failed)]
+    #[case(vec![dl(Lifecycle::Running), dl(Lifecycle::Queued)], FlowStatus::Running)]
+    #[case(vec![dl(Lifecycle::Queued), dl(Lifecycle::Success)], FlowStatus::Queued)]
+    #[case(vec![dl(Lifecycle::Success), dl(Lifecycle::Success)], FlowStatus::Done)]
+    #[case(vec![dl(Lifecycle::Success), dl(Lifecycle::Skipped)], FlowStatus::Partial)]
+    #[case(vec![dl(Lifecycle::Skipped), dl(Lifecycle::Skipped)], FlowStatus::Partial)]
+    #[case(vec![DisplayLifecycle::Pending, dl(Lifecycle::Success)], FlowStatus::Pending)]
+    #[case(vec![DisplayLifecycle::Pending, dl(Lifecycle::Skipped)], FlowStatus::Pending)]
+    fn aggregate_flow_status_priority(
+        #[case] jobs: Vec<DisplayLifecycle>,
+        #[case] expected: FlowStatus,
+    ) {
+        assert_eq!(aggregate_flow_status(&jobs), expected);
     }
 }
