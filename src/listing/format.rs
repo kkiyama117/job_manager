@@ -197,10 +197,13 @@ pub fn format_tree(flows: &[&CollectedFlow]) -> String {
             let edges = if job.parents.is_empty() {
                 String::new()
             } else {
+                // `DependencyType`'s `Display` is its stable Slurm keyword
+                // (`afterok`, `after`, …) and round-trips via `FromStr`;
+                // prefer it over `Debug` for user-facing tree output.
                 let ps: Vec<String> = job
                     .parents
                     .iter()
-                    .map(|e| format!("{:?} {}", e.kind, e.from.0))
+                    .map(|e| format!("{} {}", e.kind, e.from.0))
                     .collect();
                 format!("  ({})", ps.join(", "))
             };
@@ -339,7 +342,7 @@ mod tests {
         assert!(t.contains("01997cdc  (2 jobs"));
         assert!(t.contains("├─ step1  OK"));
         assert!(t.contains("└─ step2  PD"));
-        assert!(t.contains("AfterOk step1"));
+        assert!(t.contains("afterok step1"));
     }
 
     fn sample_flow_row() -> FlowRow {
