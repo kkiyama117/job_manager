@@ -1,4 +1,4 @@
-# TOML Reference Doc + `examples/tomls/` + `jm doctor` — Design
+# TOML Reference Doc + `examples/full/` + `jm doctor` — Design
 
 **Date:** 2026-05-16
 **Status:** Draft (awaiting user review)
@@ -19,7 +19,7 @@ tree is well-formed before `render`/`submit`.
 This work delivers three things:
 
 1. **`docs/toml-reference.md`** — one consolidated, field-by-field reference.
-2. **`examples/tomls/`** — an exhaustive, *valid* example tree mirroring the
+2. **`examples/full/`** — an exhaustive, *valid* example tree mirroring the
    real on-disk layout, showing every user-settable field.
 3. **`jm doctor`** — a subcommand that validates the TOML files (and
    structural invariants) of a `<root>` tree, with an extensibility seam
@@ -31,7 +31,7 @@ This work delivers three things:
 - Every user-settable field has an exhaustive, copy-pasteable, *parseable*
   example.
 - `jm doctor` catches malformed TOML and structural mistakes (and, run in
-  CI against `examples/tomls/`, prevents the examples from rotting when
+  CI against `examples/full/`, prevents the examples from rotting when
   upstream structs change).
 
 ## Non-goals (YAGNI)
@@ -95,7 +95,7 @@ Single consolidated reference. Structure:
    Each section: a field table — **TOML key | Type | Required? | Default
    | Notes** — plus the source struct + `file:line` + which repo, the
    `deny_unknown_fields` status, and a link to the matching file under
-   `examples/tomls/`.
+   `examples/full/`.
 
 3. **SLURM config value grammars** (the part users most often get wrong):
    `time_limit`, `array_spec`, `dependency`, `resource_spec`,
@@ -118,7 +118,7 @@ the artifact.
 
 ---
 
-## Deliverable 2 — `examples/tomls/`
+## Deliverable 2 — `examples/full/`
 
 **Style: valid + exhaustive.** Every file parses cleanly through serde
 (round-trips into its struct), and every user-settable field is present
@@ -127,10 +127,10 @@ commented out with an explanatory note.
 
 **Layout mirrors the real on-disk structure** (so it doubles as the
 canonical layout example and is directly checkable with
-`jm --root examples/tomls doctor`):
+`jm --root examples/full doctor`):
 
 ```
-examples/tomls/
+examples/full/
   README.md
   common.toml
   019xxxxxxxxx-xxxx-7xxx-xxxx-xxxxxxxxxxxx/   # UUID v7, MUST match dir name
@@ -248,7 +248,7 @@ the exit code.
   uuid mismatch, dangling parent, missing partition, plan drift),
   co-located in `src/doctor/`.
 - **`tests/doctor_examples.rs`** — runs `run_doctor` against
-  `examples/tomls/` and asserts **zero FAIL**. This is the drift guard:
+  `examples/full/` and asserts **zero FAIL**. This is the drift guard:
   if an upstream struct changes incompatibly, this test (and `jm doctor`)
   goes red. It runs under the existing CI gate (`cargo test
   --all-features`), so no CI command change is needed.
@@ -256,18 +256,18 @@ the exit code.
 ## Documentation updates
 
 - `docs/toml-reference.md` — new (Deliverable 1).
-- `examples/tomls/README.md` — new (Deliverable 2).
+- `examples/full/README.md` — new (Deliverable 2).
 - `README.md` — add `jm doctor` to the commands list; add a pointer to
   `docs/toml-reference.md`.
 - `CLAUDE.md` — add `jm doctor` to the CLI cheatsheet; note the
-  `examples/tomls/` tree and the doctor drift test.
+  `examples/full/` tree and the doctor drift test.
 - `docs/API.md` / `docs/development.md` — one-line pointers to the new
   reference and to `jm doctor`.
 
 ## Work breakdown (for the implementation plan)
 
 1. `docs/toml-reference.md` (+ README/API/architecture cross-links).
-2. `examples/tomls/` tree + `README.md`.
+2. `examples/full/` tree + `README.md`.
 3. `src/doctor/` module: `Check` seam, parse checks, structural checks,
    `run_doctor`, findings/report types, unit tests.
 4. `jm doctor` CLI wiring in `src/bin/jm.rs`.
@@ -280,10 +280,10 @@ convention.
 
 ## Risks / notes
 
-- Keeping `examples/tomls/` *valid* against three crates is exactly why
+- Keeping `examples/full/` *valid* against three crates is exactly why
   the doctor drift test exists; without it the examples silently rot.
 - The exhaustive `flow.toml` must set `partition` explicitly (no reliance
-  on injection) or `jm --root examples/tomls doctor` would depend on the
+  on injection) or `jm --root examples/full doctor` would depend on the
   example `common.toml` — acceptable since both exist in the tree; the
   doc must explain that real `flow.toml`s may omit it.
 - `JobReason` has 60+ variants; the reference lists common ones and
