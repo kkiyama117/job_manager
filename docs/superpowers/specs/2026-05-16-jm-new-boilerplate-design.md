@@ -62,8 +62,8 @@ jm --root <ROOT> new [--tag <KEY=VALUE>]... [--print-path]
    - `build_flow_template(&uuid, created_at, &tags) -> String`
    - `build_plan_template() -> String`
    - `created_at` は `chrono::Utc::now()` を RFC3339(`to_rfc3339_opts(SecondsFormat::Secs, true)`)で文字列化。
-7. `atomic_write(&resolver.flow_toml(&uuid), flow_str.as_bytes())?` → 失敗時は **作成済み `flow_dir` を `tokio::fs::remove_dir_all` で巻き戻し**てから `?` 伝播(中途半端なディレクトリを残さない)。
-8. `atomic_write(&resolver.plan_toml(&uuid), plan_str.as_bytes())?` → 同上の巻き戻し。
+7. `atomic_write_str(&resolver.flow_toml(&uuid), &flow_str)?` → 失敗時は **作成済み `flow_dir` を `std::fs::remove_dir_all` で巻き戻し**てから `?` 伝播(中途半端なディレクトリを残さない)。
+8. `atomic_write_str(&resolver.plan_toml(&uuid), &plan_str)?` → 同上の巻き戻し。
 9. 出力:
    - `print_path` 時: `println!("{}", flow_dir.display());`
    - 非 `print_path` 時:
@@ -74,7 +74,33 @@ jm --root <ROOT> new [--tag <KEY=VALUE>]... [--print-path]
      next: edit flow.toml, then `jm --root <root> render <uuid>`
      ```
 
-`atomic_write` は `persistence::atomic_write`(PID サフィックス付き tmp + rename)。`pub(crate)` のため `src/bin/jm.rs` から使えるか確認 → 使えなければ `cmd_render` 等と同様に薄いラッパを通すか、`std::fs::write` ベースの最小アトミック書き込みを CLI 側ローカルに用意する(実装フェーズで判断、設計上はアトミック性が要件)。
+**`atomic_write_str` の所在(spec correction 2026-05-16):** lib の
+`persistence::atomic_write` は `pub(crate)` であり、`src/bin/jm.rs` は
+`job_manager` を**外部クレートとして** `use` するため**アクセス不可**。
+公開 API を CLI 専用都合で広げるのも避けたい。よって `src/bin/jm.rs`
+内にローカルなフリー関数 `atomic_write_str(path: &Path, body: &str)
+-> std::io::Result<()>` を実装する:
+
+```rust
+fn atomic_write_str(path: &std::path::Path, body: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+```
+
+CLAUDE.md の「PID サフィックス付き tmp + atomic rename」規約を踏襲
+(lib 側の `tmp_extension()` ほど厳密ではないが、`jm new` は同一 path を
+並行で書かない一発生成なので PID サフィックスで十分)。`chmod 0600` は
+`flow.toml` / `plan.toml` が user-authored 公開ファイルなので不要
+(`batch.bash` の 0600 とは要件が異なる)。
 
 ## 5. テンプレート内容
 
@@ -100,8 +126,12 @@ program = "echo"
 body    = "echo \"[step1] flow=$JM_FLOW_UUID job=$JM_JOB_ID\"\n"
 
 [jobs.step1.config]
-# partition は common.toml の [slurm_default] から自動補完される。
-# 個別に上書きする場合のみ partition = "..." を指定。
+# `jm new` does NOT create common.toml, so `partition` is written here
+# explicitly. REPLACE_ME makes `jm render` succeed but real `jm submit`
+# fail fast with "invalid partition: REPLACE_ME" until you set a real
+# partition (sinfo -s). Alternatively, create <root>/common.toml with a
+# [slurm_default] partition and delete this line to inherit it.
+partition = "REPLACE_ME"
 
 # --- step 2: runs only if step1 exits 0 ---
 [jobs.step2]
@@ -113,7 +143,18 @@ from = "step1"
 kind = "afterok"
 
 [jobs.step2.config]
+partition = "REPLACE_ME"
 ```
+
+**partition が必須な理由(spec correction 2026-05-16):** `jm new` は
+`common.toml` を生成しない(Non-goals)。`common.toml` 不在時
+`FlowRun::read` は `synth_empty_common()`(partition="")にフォールバックし、
+`read_flow` の `inject_partition_defaults` が「flow にも common にも
+partition が無い」と判断して `PartitionMissing` を返す。よって
+`render` が通る形にするには **テンプレートの `[jobs.*.config]` に
+`partition` を文字列で持たせる**必要がある。`REPLACE_ME` は
+`examples/simple/inputs/common.toml` と同じ sentinel 哲学
+(`render` は通る / 実 `submit` は明確に落ちる)。
 
 ### plan.toml
 
@@ -151,15 +192,16 @@ note = "TODO: replace with real render params"
 ### テスト
 
 1. **ユニット**(`src/bin/jm.rs` の `#[cfg(test)] mod tests`):
-   - `build_flow_template` の出力が `toml::from_str::<JobFlow>` でパースできる(common 注入が要るので、`synth_empty_common` を使い `read_flow` 相当の経路 — もしくは partition 注入後の effective 形でパース確認)。
+   - `build_flow_template` の出力が `toml::from_str::<JobFlow>` で**直接**パースできる(テンプレートに `partition = "REPLACE_ME"` を含むので common 注入不要)。`jobs` が `step1` / `step2` を含み、`step2.parents[0]` が `from="step1", kind=afterok`、両 config の `partition == "REPLACE_ME"` を assert。
    - `build_plan_template` の出力が `toml::from_str::<ExperimentPlan>` でパースできる。
-   - flow と plan の JobId 集合一致を assert。
+   - flow の JobId 集合と plan の `jobs` キー集合が一致する(`{step1, step2}`)。
    - `--tag` パース: `a=b` → `("a","b")`、`a=b=c` → `("a","b=c")`、`abc`(=無し)→ Err。
+   - `--tag` ありの `build_flow_template` が `[tags]` に `key = "value"` 行を出力し、再パースで `flow.tags["key"] == "value"`。
 2. **統合**(`tests/integration_new.rs`, `assert_cmd`):
    - tempdir を root に `jm new` 実行 → exit 0、stdout に uuid。
    - `<root>/<uuid>/flow.toml` と `plan.toml` が存在。
-   - 生成 flow を `FlowRun::read`(`synth_empty_common` 経由)で再ロードでき、jobs が 2 個。
-   - `jm new` → 続けて `jm render <uuid>` が exit 0(`examples/simple` 同型なので通るはず)= ラウンドトリップ検証。
+   - 生成 flow を `FlowRun::read`(common.toml 不在 → `synth_empty_common` フォールバック)で再ロードでき、jobs が 2 個(partition は REPLACE_ME として既にあるので `PartitionMissing` にならない)。
+   - `jm new` → 続けて `jm render <uuid>` が exit 0 = ラウンドトリップ検証。
    - `--print-path` 時、stdout が `<root>/<uuid>` 1 行のみ。
    - `--tag env=prod` で生成 flow の `tags["env"] == "prod"`。
 
