@@ -64,19 +64,11 @@ mod tests {
     use tempfile::tempdir;
 
     fn cfg_with(stdout: Option<&str>, stderr: Option<&str>) -> SlurmJobConfig {
-        SlurmJobConfig {
-            partition: "long".to_string(),
-            time_limit: None,
-            log_stdout: stdout.map(PathBuf::from),
-            log_stderr: stderr.map(PathBuf::from),
-            comment: None,
-            job_name: None,
-            array_spec: None,
-            dependency: None,
-            mail_user: None,
-            mail_types: None,
-            resource_spec: None,
-        }
+        let mut c = crate::persistence::synth_empty_common().slurm_default;
+        c.partition = "long".to_string();
+        c.log_stdout = stdout.map(PathBuf::from);
+        c.log_stderr = stderr.map(PathBuf::from);
+        c
     }
 
     #[test]

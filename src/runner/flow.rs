@@ -204,7 +204,10 @@ impl<'r> FlowRunner<'r> {
         // reason. Validate every job's effective log dirs up front (real
         // submit only) so we abort here with a clear error instead of
         // partially submitting a flow that will fail opaquely. Skipped
-        // for dry_run (render-only never reaches SLURM).
+        // for dry_run (render-only never reaches SLURM). Resolved configs
+        // are cached and consumed by the submit loop below, so
+        // `effective_config` runs exactly once per job.
+        let mut effective: BTreeMap<JobId, _> = BTreeMap::new();
         if !dry_run {
             for jid in &order {
                 let config = fr.effective_config(jid)?;
@@ -219,6 +222,7 @@ impl<'r> FlowRunner<'r> {
                         dir,
                     });
                 }
+                effective.insert(jid.clone(), config);
             }
         }
 
@@ -256,7 +260,11 @@ impl<'r> FlowRunner<'r> {
             }
 
             // --- build SbatchCmd ---
-            let config = fr.effective_config(jid)?;
+            // Reuse the config the preflight already resolved (real
+            // submit only; the dry_run path `continue`d above).
+            let config = effective
+                .remove(jid)
+                .expect("preflight resolved the effective config for every submitted job");
             let mut cmd = SbatchCmd::new(batch_path.clone());
             cmd.partition = Some(config.partition.clone());
             cmd.time_limit = config.time_limit;
@@ -488,18 +496,11 @@ mod tests {
                 spec: JobSpec {
                     program: Program("dummy".to_string()),
                     body: "echo hello".to_string(),
-                    config: SlurmJobConfig {
-                        partition: "long".to_string(),
-                        time_limit: None,
-                        log_stdout,
-                        log_stderr: None,
-                        comment: None,
-                        job_name: None,
-                        array_spec: None,
-                        dependency: None,
-                        mail_user: None,
-                        mail_types: None,
-                        resource_spec: None,
+                    config: {
+                        let mut c = crate::persistence::synth_empty_common().slurm_default;
+                        c.partition = "long".to_string();
+                        c.log_stdout = log_stdout;
+                        c
                     },
                 },
                 parents: vec![],

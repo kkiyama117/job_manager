@@ -369,26 +369,11 @@ kind = "afterok"
     /// every other field empty. Mirrors the on-disk shape jobs inherit
     /// when `[jobs.*.config]` omits `log_stdout`/`log_stderr`.
     fn common_with_logs(stdout: Option<&str>, stderr: Option<&str>) -> CommonConfig {
-        use gaussian_job_shared::config::common::DirectoryConfig;
-        use slurm_async_runner::entities::slurm::SlurmJobConfig;
-        CommonConfig {
-            slurm_default: SlurmJobConfig {
-                partition: "long".to_string(),
-                time_limit: None,
-                log_stdout: stdout.map(std::path::PathBuf::from),
-                log_stderr: stderr.map(std::path::PathBuf::from),
-                comment: None,
-                job_name: None,
-                array_spec: None,
-                dependency: None,
-                mail_user: None,
-                mail_types: None,
-                resource_spec: None,
-            },
-            directories: DirectoryConfig {
-                project_root: std::path::PathBuf::from("/work"),
-            },
-        }
+        let mut c = synth_empty_common();
+        c.slurm_default.partition = "long".to_string();
+        c.slurm_default.log_stdout = stdout.map(std::path::PathBuf::from);
+        c.slurm_default.log_stderr = stderr.map(std::path::PathBuf::from);
+        c
     }
 
     #[test]
