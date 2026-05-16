@@ -43,8 +43,9 @@ This crate is the orchestration layer on top of two upstream libraries:
 
 ## Demo
 
-> A real screencast lives at `docs/assets/jm-demo.gif` (TBD). Until then, here is a
-> reproduction of what `jm` prints against a 3-job flow:
+> A real screencast lives at `docs/assets/jm-demo.gif` (TBD). Until then, here is an
+> illustrative sketch of a 3-job flow run — stylized for readability; the real
+> `jm render` prints a terser `rendered 3 jobs in <uuid>` line:
 
 ```text
 $ jm --root /work render 01997cdc-0000-7000-8000-000000000000

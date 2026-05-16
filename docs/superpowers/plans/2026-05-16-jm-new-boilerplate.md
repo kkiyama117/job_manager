@@ -433,12 +433,22 @@ Add to `src/bin/jm.rs` (above `#[cfg(test)]`):
 ```rust
 /// Atomic write for `jm new`'s generated files. `persistence::atomic_write`
 /// is `pub(crate)` and unreachable from this binary crate, so this is a
-/// minimal local equivalent: write to a PID-suffixed tmp, fsync, rename
-/// over `path`, and clean the tmp on failure. `jm new` never writes the
-/// same path concurrently, so PID alone is a sufficient tmp discriminator.
+/// minimal local equivalent: write to a `<filename>.<pid>.tmp` sibling,
+/// fsync, rename over `path`, and clean the tmp on failure. `jm new` never
+/// writes the same path concurrently, so PID alone is a sufficient tmp
+/// discriminator. The tmp name is built by *appending* (not
+/// `Path::with_extension`, which would replace `.toml` and produce
+/// `flow.<pid>.tmp`), matching the CLAUDE.md `<name>.<pid>.tmp` convention.
 fn atomic_write_str(path: &std::path::Path, body: &str) -> std::io::Result<()> {
     use std::io::Write;
-    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    let mut tmp_name = path
+        .file_name()
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
+        })?
+        .to_os_string();
+    tmp_name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = path.with_file_name(tmp_name);
     {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(body.as_bytes())?;

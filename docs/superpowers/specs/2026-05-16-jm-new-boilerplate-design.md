@@ -25,7 +25,7 @@
 2. 生成 UUID がルート内で衝突しないことを確認する(防御コード — `now_v7()` の実衝突は実質ゼロ)。
 3. テンプレートは `examples/simple` 同型の **2-job DAG**(`step1 → step2`, `afterok`)。生成直後に `jm render` / `jm submit --dry-run` がエラーなく通る形にする。
 4. `--tag k=v`(繰り返し可)で `[tags]` を埋められる。
-5. 既存 CLI の `resolve_root()` / `atomic_write()` を再利用し、書き込みは中途半端な状態を残さない。
+5. 書き込みは中途半端な状態を残さない。`resolve_root()` は既存 CLI から再利用するが、`persistence::atomic_write` は `pub(crate)` で binary crate から到達不可のため、§4 のローカル `atomic_write_str` を実装して使う(spec correction 2026-05-16)。
 
 ### Non-goals
 
@@ -84,7 +84,17 @@ jm --root <ROOT> new [--tag <KEY=VALUE>]... [--print-path]
 ```rust
 fn atomic_write_str(path: &std::path::Path, body: &str) -> std::io::Result<()> {
     use std::io::Write;
-    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    // CLAUDE.md tmp 規約は `<filename>.<pid>.tmp`(対象と同ディレクトリ)。
+    // `Path::with_extension` は `.toml` を *置換* して `flow.<pid>.tmp` に
+    // なってしまうため、ファイル名へ末尾追加して tmp パスを組む。
+    let mut tmp_name = path
+        .file_name()
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
+        })?
+        .to_os_string();
+    tmp_name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = path.with_file_name(tmp_name);
     {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(body.as_bytes())?;
@@ -96,11 +106,12 @@ fn atomic_write_str(path: &std::path::Path, body: &str) -> std::io::Result<()> {
 }
 ```
 
-CLAUDE.md の「PID サフィックス付き tmp + atomic rename」規約を踏襲
-(lib 側の `tmp_extension()` ほど厳密ではないが、`jm new` は同一 path を
-並行で書かない一発生成なので PID サフィックスで十分)。`chmod 0600` は
-`flow.toml` / `plan.toml` が user-authored 公開ファイルなので不要
-(`batch.bash` の 0600 とは要件が異なる)。
+CLAUDE.md の `<filename>.<pid>.tmp` 規約に揃える(`flow.toml` →
+`flow.toml.<pid>.tmp`)。lib 側の `tmp_extension()` は更に `nanos` /
+`thread-id` も付けて並行書き込みに耐えるが、`jm new` は新規 UUID
+ディレクトリへの一発生成で同一 path を並行で書かないため PID
+サフィックスで十分。`chmod 0600` は `flow.toml` / `plan.toml` が
+user-authored 公開ファイルなので不要(`batch.bash` の 0600 とは要件が異なる)。
 
 ## 5. テンプレート内容
 
