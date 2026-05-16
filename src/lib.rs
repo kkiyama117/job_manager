@@ -18,7 +18,7 @@ pub mod slurm;
 pub mod view;
 pub mod walk;
 
-pub use doctor::{DoctorReport, Finding, Severity};
+pub use doctor::{DoctorReport, DoctorScope, Finding, Severity, run_doctor};
 pub use error::{JobManagerError, SchemaParseError};
 pub use flow::FlowRun;
 pub use job::{JobRun, Lifecycle};
