@@ -110,9 +110,9 @@ class SearchFilter:
     @tags.setter
     def tags(self, value: typing.Mapping[builtins.str, builtins.str]) -> None: ...
     @property
-    def status(self) -> typing.Optional[Lifecycle]: ...
+    def status(self) -> builtins.list[builtins.str]: ...
     @status.setter
-    def status(self, value: typing.Optional[Lifecycle]) -> None: ...
+    def status(self, value: typing.Sequence[builtins.str]) -> None: ...
     @property
     def flow_uuid_prefix(self) -> typing.Optional[builtins.str]: ...
     @flow_uuid_prefix.setter
@@ -137,7 +137,7 @@ class SearchFilter:
         cls,
         program: typing.Optional[builtins.str] = None,
         tags: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None,
-        status: typing.Optional[Lifecycle] = None,
+        status: typing.Optional[typing.Sequence[builtins.str]] = None,
         flow_uuid_prefix: typing.Optional[builtins.str] = None,
         created_after: typing.Optional[datetime.datetime] = None,
         created_before: typing.Optional[datetime.datetime] = None,
