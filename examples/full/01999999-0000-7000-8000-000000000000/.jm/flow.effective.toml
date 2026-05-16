@@ -1,0 +1,52 @@
+# PROGRAM-WRITTEN — DO NOT EDIT.
+#
+# Materialized JobFlow snapshot (Cargo.lock analogue): every default from
+# common.toml is baked in. job-manager writes this on `jm render`/`submit`
+# and reads it on `tick`/`show` (no common.toml needed). Shown here so you
+# know what the snapshot looks like; `jm doctor` parse-checks it. The body
+# below is the actual `jm render --effective-only` output for this flow.
+
+uuid = "01999999-0000-7000-8000-000000000000"
+created_at = "2026-05-15T00:00:00Z"
+
+[tags]
+example = "full"
+owner = "demo"
+
+[jobs.freq]
+program = "echo"
+body = """
+echo "[freq] flow=$JM_FLOW_UUID job=$JM_JOB_ID"
+sleep 1
+"""
+
+[jobs.freq.config]
+partition = "long"
+time_limit = "00:30:00"
+
+[[jobs.freq.parents]]
+from = "opt"
+kind = "afterok"
+
+[jobs.opt]
+program = "echo"
+body = """
+echo "[opt] flow=$JM_FLOW_UUID job=$JM_JOB_ID"
+sleep 1
+"""
+parents = []
+
+[jobs.opt.config]
+partition = "long"
+time_limit = "01:00:00"
+log_stdout = "/work/jm-full/opt.%j.out"
+log_stderr = "/work/jm-full/opt.%j.err"
+comment = "optimization step"
+job_name = "jm-full-opt"
+array_spec = "0-1"
+mail_user = "user@example.com"
+mail_types = [
+    "END",
+    "FAIL",
+]
+resource_spec = "p=1:t=8:c=8:m=8G"

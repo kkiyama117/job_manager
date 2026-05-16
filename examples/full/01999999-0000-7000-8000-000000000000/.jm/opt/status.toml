@@ -1,0 +1,20 @@
+# PROGRAM-WRITTEN — DO NOT EDIT.
+#
+# Per-job runtime state. Schema: job_manager::job::JobRun (deny_unknown_fields)
+#   lifecycle   queued | running | success | failed | skipped
+#   updated_at  RFC3339 UTC
+#   slurm_jobid optional u64 (omitted until submitted)
+#   note        optional string
+#   [slurm_status] optional A1 JobStatus snapshot { state, reason }
+#
+# Note: `state` uses SLURM canonical UPPERCASE (e.g. "RUNNING").
+#       `reason` uses SLURM PascalCase (e.g. "None", "Priority").
+
+lifecycle = "running"
+updated_at = "2026-05-15T00:05:00Z"
+slurm_jobid = 12345
+note = "submitted by jm submit"
+
+[slurm_status]
+state = "RUNNING"
+reason = "None"

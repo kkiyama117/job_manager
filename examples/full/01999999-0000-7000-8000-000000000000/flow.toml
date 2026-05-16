@@ -1,0 +1,51 @@
+# examples/full/<uuid>/flow.toml — EXHAUSTIVE, VALID JobFlow.
+#
+# Schema: gaussian_job_shared::entities::workflow::JobFlow
+#   uuid          UUID v7 — MUST equal the parent directory name
+#   created_at    RFC3339 UTC
+#   tags          optional BTreeMap<String,String>
+#   jobs.<JobId>  Job = JobSpec{program,config,body} (flattened) + parents[]
+#
+# Two jobs: `opt` (root) -> `freq` (afterok opt). `opt.config` shows every
+# SlurmJobConfig field. partition is set explicitly so this file is valid
+# standalone (a real flow.toml may omit it and inherit from common.toml).
+
+uuid       = "01999999-0000-7000-8000-000000000000"
+created_at = "2026-05-15T00:00:00Z"
+
+[tags]
+example = "full"
+owner   = "demo"
+
+# --- root job: every SlurmJobConfig field set ---
+[jobs.opt]
+program = "echo"
+body    = "echo \"[opt] flow=$JM_FLOW_UUID job=$JM_JOB_ID\"\nsleep 1\n"
+
+[jobs.opt.config]
+partition     = "long"
+time_limit    = "01:00:00"
+job_name      = "jm-full-opt"
+comment       = "optimization step"
+log_stdout    = "/work/jm-full/opt.%j.out"
+log_stderr    = "/work/jm-full/opt.%j.err"
+mail_user     = "user@example.com"
+mail_types    = ["END", "FAIL"]        # array of: BEGIN, END, FAIL, REQUEUE, ALL
+resource_spec = "p=1:t=8:c=8:m=8G"   # CPU form "p=N:t=N:c=N:m=NG" OR GPU form "g=N" — one string, mutually exclusive
+array_spec    = "0-1"
+# dependency  = "afterok:12345"      # job-manager manages deps via parents[]; manual override only
+
+# --- child job: depends on opt finishing exit 0 ---
+[jobs.freq]
+program = "echo"
+body    = "echo \"[freq] flow=$JM_FLOW_UUID job=$JM_JOB_ID\"\nsleep 1\n"
+
+[jobs.freq.config]
+partition  = "long"
+time_limit = "00:30:00"
+
+# JobEdge.kind in { afterok, afterany, after, afternotok, aftercorr,
+#                   afterburstbuffer, singleton }. afterok is the common one.
+[[jobs.freq.parents]]
+from = "opt"
+kind = "afterok"
