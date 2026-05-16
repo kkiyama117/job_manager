@@ -433,4 +433,20 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn flow_template_renders_tags_section() {
+        use gaussian_job_shared::entities::workflow::JobFlow;
+
+        let uuid = uuid::Uuid::now_v7();
+        let mut tags = BTreeMap::new();
+        tags.insert("env".to_string(), "prod".to_string());
+        tags.insert("owner".to_string(), "a=b".to_string()); // value with '='
+
+        let s = build_flow_template(&uuid, "2026-05-16T00:00:00Z", &tags);
+        let flow: JobFlow = toml::from_str(&s).expect("tagged flow template parses");
+
+        assert_eq!(flow.tags.get("env").map(String::as_str), Some("prod"));
+        assert_eq!(flow.tags.get("owner").map(String::as_str), Some("a=b"));
+    }
 }
