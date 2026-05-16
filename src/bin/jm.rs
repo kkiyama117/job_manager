@@ -398,7 +398,16 @@ async fn cmd_ls(root: &std::path::Path, view: &LsView) -> anyhow::Result<()> {
             let selected: Vec<&job_manager::listing::CollectedFlow> = match target {
                 Some(t) => {
                     let uuid = parse_target(root, t)?;
-                    collected.iter().filter(|c| c.flow.uuid == uuid).collect()
+                    let sel: Vec<&job_manager::listing::CollectedFlow> =
+                        collected.iter().filter(|c| c.flow.uuid == uuid).collect();
+                    if sel.is_empty() {
+                        // Read-only filter: keep exit 0 (no flow on disk is not
+                        // an error), but tell the user nothing matched —
+                        // otherwise a typo'd uuid is silently indistinguishable
+                        // from an empty flow.
+                        eprintln!("jm ls tree: no flow matched {uuid}");
+                    }
+                    sel
                 }
                 None => job_manager::listing::matched_flows(&collected, &f, filter.limit),
             };

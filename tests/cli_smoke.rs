@@ -71,3 +71,21 @@ fn jm_render_writes_batch_bash() {
 
     assert!(resolver.batch_bash(&uuid, &jid).exists());
 }
+
+#[test]
+fn jm_ls_tree_unknown_uuid_warns_but_succeeds() {
+    // A well-formed uuid with no flow on disk: read-only, so exit 0,
+    // but a diagnostic must reach stderr (otherwise a typo'd uuid is
+    // silently indistinguishable from an empty flow).
+    let dir = tempdir().unwrap();
+    let uuid = uuid::Uuid::new_v4();
+    let mut cmd = Command::cargo_bin("jm").unwrap();
+    cmd.arg("--root")
+        .arg(dir.path())
+        .arg("ls")
+        .arg("tree")
+        .arg(uuid.to_string());
+    cmd.assert()
+        .success()
+        .stderr(predicate::str::contains(format!("no flow matched {uuid}")));
+}
