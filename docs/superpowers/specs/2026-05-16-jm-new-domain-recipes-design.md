@@ -1,382 +1,417 @@
-# `jm new <recipe>` — ドメイン固有レシピ — design (rev.2)
+# `jm new <flow-recipe>` — 二層レシピ(Job 層 / Flow 層)— design (rev.3)
 
 **Date:** 2026-05-16
-**Status:** Draft (rev.2 — established-ecosystem 整合反映。awaiting user review)
+**Status:** Draft (rev.3 — 二層アーキテクチャ反映。awaiting user review)
 **Reference:**
 - 既存エコシステム(整合対象。`git@github.com:miyake-ken/gaussian-experiment-manager.git` "collapsed" + `github.com/miyake-ken/GAUSSIAN_repo/examples`):
-  - `experiment.toml` / `common.toml` スキーマ、`[step.params]`(`route`/`charge`/`multiplicity`/`extra_input`)
-  - **main batch(`gaussian-run-g16`)→ afterok → post batch(`gaussian-parse-results`, cclib)** の 2-batch チェーン
+  - `experiment.toml` `[step.params]`(`route`/`charge`/`multiplicity`/`extra_input`)
+  - **main(`gaussian-run-g16`)→ afterok → post(`gaussian-parse-results`, cclib)** の 2-batch チェーン
   - `.gjf` 形式(`%rwf`/`%nprocshared`/`%mem`/`%chk` → route → title → charge mult → geometry → connectivity → extra_input)
-  - `<env.root>/<uuid>/{input,output,derived}/` レイアウト、`task_basename`(既定 `main`)、InChIKey compound
-  - `[slurm]` vs `[slurm.post]`(post 用 per-field override)
-  - **重要**: 当該エコシステム全体に **OpenMM は一切登場しない**(`grep openmm` ヒット 0)。「結果検証」の確立実装は cclib による .out パース + 収束/エネルギー検証
-- `docs/superpowers/specs/2026-05-16-jm-new-boilerplate-design.md`(既存 `jm new` の sentinel 哲学)
+  - `<env.root>/<uuid>/{input,output,derived}/`、`task_basename`(既定 `main`)、InChIKey compound
+  - `[slurm]` vs `[slurm.post]`、**OpenMM はエコシステムに一切なし**(確立検証は cclib)
+- 二層分離の先行例:nf-core(modules vs subworkflows)/ Snakemake(rule・wrapper vs workflow)/ atomate(Firework vs Workflow)。gem 自体も step program(run-g16 / parse-results)= job 粒度、step 連鎖 = flow 粒度
+- `docs/superpowers/specs/2026-05-16-jm-new-boilerplate-design.md`(既存 `jm new` sentinel 哲学)
 - `src/bin/jm.rs`(`Cmd::New` / `cmd_new` / `build_flow_template` / `build_plan_template` / `atomic_write_str`)
-- `src/render/mod.rs`(`render_batch_bash` — 公開 API + Python エクスポート, prod caller は `src/runner/flow.rs:245` のみ)
-- `src/runner/flow.rs:262-289`(submit 経路の `SbatchCmd` 構築。`cmd.chdir` 未設定)
+- `src/render/mod.rs`(`render_batch_bash` — 公開 API + Python エクスポート、prod caller は `src/runner/flow.rs:245` のみ)
+- `src/runner/flow.rs:262-289`(submit 経路 `SbatchCmd` 構築。`cmd.chdir` 未設定)
 - 上流 A1 `slurm-async-runner2/src/sbatch/cmd.rs:133-134`(`SbatchCmd.env` → `--export=ALL,K=V,...`)
-- CLAUDE.md(Out of scope / PyO3 境界 / `.jm/` レイアウト / `--no-default-features` 制約)
+- CLAUDE.md(Out of scope / PyO3 境界 / `.jm/` レイアウト / `--no-default-features`)
 
 ---
 
 ## 1. 問題設定
 
-`jm new`(別 spec)は静的な 2-job `step1 → step2` 雛形を生成する汎用 scaffold。ユーザ要求は「g16 で構造最適化入力を作り、正常終了後(`afterok`)に Python で結果を検証する」ドメイン固有チェーンの scaffold。
+`jm new`(別 spec)は静的 2-job 雛形のみ。ユーザ要求は「g16 構造最適化 → afterok → 結果検証」のドメインチェーン scaffold。エコシステム精査の結果、確立実装は OpenMM ではなく **cclib による `gaussian-parse-results`**(.out をパースし収束/エネルギー検証)。
 
-rev.1 では検証を OpenMM と仮定したが、ユーザ提示の既存エコシステム(gem + GAUSSIAN_repo)を精査した結果、**「g16 opt 実行 → afterok → 結果検証」の確立実装は OpenMM ではなく cclib ベースの `gaussian-parse-results`**(.out をパースし収束/エネルギーを検証、終端 status を書く post バッチ)であった。OpenMM はエコシステム全体で未使用。ユーザ判断により本レシピは **parse-results 規約へ整合**(OpenMM は本 spec 非対象)。
+さらにユーザ要求により、テンプレートを **再利用可能な二層** に分割する:
 
-`jm` レシピは、この確立済みドメイン規約(パラメータ語彙・main→post afterok・gjf 形式・input/output/derived レイアウト)を **job-manager の `flow.toml`/`plan.toml` で表現する橋渡し**として設計する。gem 自体は "collapsed"(畳まれた)Python 実装で、job-manager(Rust)が現行の orchestrator。レシピはコードではなく **編集可能な job-manager flow 一式**を生成する(gem に scaffold/new は存在せず、本機能は新規レイヤ)。
+- **Job 層(`JobTemplate`)** — 1 バッチ = 1 ジョブの自己完結部品(例 `g16_opt`, `parse_g16_out`)。
+- **Flow 層(`FlowRecipe`)** — JobTemplate を DAG に合成(例 `g16-opt-parse` = `g16_opt → parse_g16_out`)。`jm new` が叩く scaffold 単位。
+
+レシピはコードではなく **編集可能な job-manager flow 一式**を生成する(gem に scaffold/new は無く本機能は新規レイヤ)。gem の**ドメイン意味論**を写すが**スキーマは job-manager の `flow.toml`/`plan.toml`**。
 
 ## 2. ゴール / 非ゴール
 
 ### Goals
 
-1. `jm new` に**位置引数 `<recipe>`** を追加。`jm new`(無引数)= 組込 `blank` レシピ(既存 2-job 雛形、**後方互換**)。`jm new g16-opt-parse --param k=v` で domain レシピ生成。
-2. レシピは **Rust 側の型付きレジストリ**(B パターン)。出力ツリーは構築時点で `jm doctor`-clean を保証(flow JobId 集合 == plan `[jobs.*]` キー集合、uuid == ディレクトリ名、親エッジ整合)。
-3. domain レシピは **flow.toml / plan.toml に加えサイドカー**(`input/main.gjf`, `scripts/parse_results.py`)を生成。化学者が直接編集できる。レイアウトとファイル名は gem 規約準拠(`input/`・`output/`・`derived/`、`task_basename = main`)。
-4. レシピごとに型付きパラメータ(名前 / 既定値 / ヘルプ)。`jm new <recipe> --param KEY=VALUE`(繰返し可)。`jm new --list` / `jm new <recipe> --describe`。
-5. 実行中ジョブが自分の flow ディレクトリを解決できるよう、submit 経路で `SbatchCmd.env` に `JM_FLOW_DIR`(flow dir 絶対パス)を注入(§5, R4)。
-6. v1 レシピ: `blank` + `g16-opt-parse` の 2 つ。レジストリは追加容易。
-7. 書き込みは中途半端を残さない(既存 `jm new` の rollback 規約踏襲)。
+1. `jm new` に位置引数 `<flow-recipe>` を追加。`jm new`(無引数)= 組込 `blank`(既存 2-job 雛形、**後方互換**)。`jm new g16-opt-parse --param opt.charge=1` で domain flow 生成。
+2. **二層レジストリ**:`JobTemplate`(再利用部品)と `FlowRecipe`(合成)。FlowRecipe のみ scaffold 可能(JobTemplate は内部合成単位、CLI 非公開)。
+3. 出力ツリーは Flow 層が構築時 `jm doctor`-clean を保証(flow JobId 集合 == plan `[jobs.*]` キー集合、uuid == ディレクトリ名、親エッジ整合)。
+4. domain JobTemplate は flow.toml/plan.toml への寄与に加え、**自分の JobId 名前空間下にサイドカー**(`<JobId>/input/main.gjf`, `<JobId>/scripts/parse_results.py`)を出す。化学者が直接編集可。配置・命名は gem 準拠(`input/`・`output/`・`derived/`、`task_basename = main`)。
+5. JobTemplate ごとに型付きパラメータ。CLI は **`--param <JobId>.<param>=<value>`**。`jm new --list`(flow recipe 一覧)/ `jm new <flow-recipe> --describe`(`<JobId>.<param>` 行)。
+6. 実行中ジョブが自分のサブディレクトリを解決できるよう submit 経路で `SbatchCmd.env` に `JM_FLOW_DIR` 注入(§5, R4)。
+7. v1:JobTemplate `g16_opt` / `parse_g16_out`、FlowRecipe `blank` / `g16-opt-parse`。両レジストリは追加容易。
+8. 書き込みは中途半端を残さない(既存 `jm new` rollback 規約踏襲)。
 
 ### Non-goals
 
-- `common.toml` の生成・変更(v1)。gem は `[slurm]`/`[slurm.post]`/`[env]`/`[gaussian_cmd]` を common に持つが、job-manager 側は per-job `[jobs.*.config]`(`SlurmJobConfig`)で表現し `partition = "REPLACE_ME"` sentinel(既存 `jm new` の deferred-common 踏襲)。
-- **OpenMM**(rev.1 の誤前提。エコシステムに前例なし。ユーザ判断で除外)。
-- experiment DSL / sweep 展開 / 親解決(CLAUDE.md "Out of scope"。利用者はトポロジを書かず名前付きレシピ + スカラパラメータのみ。gem の `[[sweep]]`/`parent_uuids` 連鎖は job-manager の責務外)。
-- gem の `experiment.toml`/`common.toml` フォーマットそのものの採用(job-manager の契約は `flow.toml`/`plan.toml`。レシピは gem の**ドメイン意味論**を写すが、**スキーマは job-manager のもの**)。
-- gem の `metadata.toml`/`status` ファイル再実装(job-manager は Lifecycle + `decide_transition` + `tick` が status の権威。parse ジョブは exit code で success/fail を表すだけ)。
-- 対話的ウィザード / TUI / プロンプト、既存 flow の再生成・migration・answers-file、リモートレシピレジストリ。
+- `common.toml` 生成・変更(v1)。per-job `[jobs.*.config]`(`SlurmJobConfig`)+ `partition="REPLACE_ME"` sentinel(既存 `jm new` deferred-common 踏襲)。
+- **OpenMM**(エコシステム前例なし。ユーザ判断で除外)。
+- experiment DSL / sweep 展開 / 親解決(CLAUDE.md "Out of scope")。gem `[[sweep]]`/`parent_uuids` 連鎖は job-manager 責務外。
+- gem `experiment.toml`/`common.toml` フォーマット採用、gem `metadata.toml`/`status` 再実装(job-manager の Lifecycle + `decide_transition` + `tick` が status の権威。parse は exit code のみ)。
+- **JobTemplate 単体の直接 scaffold**(`jm new g16_opt`)。FlowRecipe のみ scaffold 可能(ユーザ判断、YAGNI)。
+- 対話的ウィザード / TUI、既存 flow 再生成・migration・answers-file、リモートレジストリ。
 - `render_batch_bash` 公開 API / PyO3 境界変更(R1 不採用, §5)、全ジョブ cwd 契約変更(R2 不採用, §5)。
-- 分子幾何の自動取得(InChIKey → 構造 DB 参照は gem の上流責務。レシピは `input/main.gjf` に geometry sentinel を置く)。
+- 分子幾何の自動取得(gem 上流責務。`input/main.gjf` に geometry sentinel)。
 
 ## 3. CLI 形
 
 ```
-jm --root <ROOT> new [<RECIPE>] [--param <KEY=VALUE>]... [--tag <KEY=VALUE>]... [--print-path]
+jm --root <ROOT> new [<FLOW-RECIPE>] [--param <JOBID.PARAM=VALUE>]... [--tag <K=V>]... [--print-path]
 jm --root <ROOT> new --list
-jm --root <ROOT> new <RECIPE> --describe
+jm --root <ROOT> new <FLOW-RECIPE> --describe
 ```
 
 | 引数 | 説明 |
 |---|---|
-| `<RECIPE>`(位置, 任意) | レジストリ内のレシピ名。省略時 `blank`。未知名は候補列挙付きエラー。 |
-| `--param <KEY=VALUE>` | 任意回。レシピ定義パラメータを上書き。未知キー / 型不整合 / `=` 無しはエラー。 |
-| `--tag <KEY=VALUE>` | 既存。`flow.toml [tags]` 反映。全レシピ共通。 |
+| `<FLOW-RECIPE>`(位置, 任意) | FlowRecipe 名。省略時 `blank`。未知名は候補列挙付きエラー。 |
+| `--param <JobId>.<param>=<value>` | 任意回。合成ノード `<JobId>` の JobTemplate パラメータを上書き。未知 JobId / 未知 param / 型不整合 / `=`・`.` 欠落はエラー。 |
+| `--tag <K=V>` | 既存。`flow.toml [tags]` 反映。 |
 | `--print-path` | 既存。stdout に `<root>/<uuid>` のみ。 |
-| `--list` | レシピ名 + 1 行説明を列挙して終了。 |
-| `--describe` | `<RECIPE>` のパラメータ(名前 / 型 / 既定値 / ヘルプ)を列挙して終了。 |
+| `--list` | FlowRecipe 名 + 1 行説明を列挙して終了。 |
+| `--describe` | `<FLOW-RECIPE>` の合成ノードと各 `<JobId>.<param>`(型/既定/ヘルプ)を列挙して終了。 |
 
-`Cmd::New` を `recipe: Option<String>` / `params: Vec<String>`(`--param`) / 既存 `tags` / `print_path` / `list: bool` / `describe: bool` へ拡張。`main()` 分岐を `cmd_new(&root, recipe.as_deref(), &params, &tags, print_path, list, describe)` に。
+`Cmd::New` を `recipe: Option<String>` / `params: Vec<String>`(`--param`)/ 既存 `tags` / `print_path` / `list: bool` / `describe: bool` へ拡張。`main()` 分岐を `cmd_new(&root, recipe.as_deref(), &params, &tags, print_path, list, describe)` に。
 
-## 4. アーキテクチャ
+## 4. アーキテクチャ(二層)
 
 ### モジュール配置
 
 ```
 src/recipes/
-  mod.rs                 -- Recipe trait, RecipeParam, RecipeCtx, GeneratedFile,
-                            registry(), find(), parse/validate params, --list/--describe 整形
-  blank.rs               -- 既存 2-job step1->step2 を Recipe 化(build_flow/plan_template 移設)
-  g16_opt_parse.rs       -- domain レシピ + asset テンプレート(include_str! or const)
+  mod.rs           -- 公開 re-export, registries, --param <JobId>.<param> パース, --list/--describe 整形
+  job.rs           -- JobTemplate trait, JobArtifacts, JobCtx, RecipeParam/Type
+  flow.rs          -- FlowRecipe trait + 合成アセンブラ(assemble())
+  jobs/
+    g16_opt.rs
+    parse_g16_out.rs
+  flows/
+    blank.rs        -- 既存 2-job step1->step2 を据置(JobTemplate 非分解、バイト同値)
+    g16_opt_parse.rs-- jobs::{g16_opt, parse_g16_out} を合成
   assets/
-    g16_opt_parse/
-      main.gjf.tmpl          -- Gaussian 入力テンプレート({{placeholder}}, gem 形式)
-      parse_results.py.tmpl  -- cclib 検証スクリプト
+    g16_opt/main.gjf.tmpl
+    parse_g16_out/parse_results.py.tmpl
 ```
 
-- `src/recipes/` は **pyo3 非依存**(`uuid`/`chrono`/`toml`/std のみ)。`jm` は `--no-default-features` ビルド必須。
-- レシピは **純粋**:`generate(ctx) -> Result<Vec<GeneratedFile>, RecipeError>`。I/O・rollback は `cmd_new`。
-- `src/lib.rs` から `pub use recipes::{Recipe, registry, ...}`(**公開 API は追加のみ**。既存破壊なし)。
+- `src/recipes/` は **pyo3 非依存**(`uuid`/`chrono`/`toml`/std のみ)。`jm` `--no-default-features` ビルド必須。
+- JobTemplate / FlowRecipe は **純粋**(I/O 無し)。I/O・rollback は `cmd_new`。
+- `src/lib.rs` から `pub use recipes::{JobTemplate, FlowRecipe, flow_registry, ...}`(**公開 API は追加のみ**)。
 
-### 型
+### 型(Job 層)
 
 ```rust
-pub struct GeneratedFile {
-    pub relpath: PathBuf,       // "flow.toml"/"plan.toml"/"input/main.gjf"/"scripts/parse_results.py"
-    pub contents: String,
-    pub unix_mode: Option<u32>, // 既定 None。parse_results.py は body 経由 `python` 実行のため exec ビット不要
-}
-
 pub enum RecipeParamType { Str, Int, Float, Bool }
+pub struct RecipeParam { pub name: &'static str, pub ty: RecipeParamType,
+                         pub default: &'static str, pub help: &'static str }
 
-pub struct RecipeParam {
-    pub name: &'static str,
-    pub ty: RecipeParamType,
-    pub default: &'static str,
-    pub help: &'static str,
+pub struct JobArtifacts {
+    pub program: String,                            // "g16" / "python"
+    pub body: String,                               // 先頭 `cd "$JM_FLOW_DIR/<JobId>"`(§5)
+    pub time_limit: Option<String>,                 // [jobs.<JobId>.config].time_limit。partition は常に REPLACE_ME
+    pub plan_params: BTreeMap<String, toml::Value>, // → plan.toml [jobs.<JobId>]
+    pub sidecars: Vec<GeneratedFile>,               // relpath は既に "<JobId>/..." で名前空間化済み
 }
 
-pub struct RecipeCtx<'a> {
-    pub uuid: &'a Uuid,
-    pub created_at: &'a str,                       // RFC3339 UTC
-    pub tags: &'a BTreeMap<String, String>,
-    pub params: &'a BTreeMap<String, toml::Value>, // 既定 + --param 上書き後の検証済み値
+pub struct GeneratedFile { pub relpath: PathBuf, pub contents: String, pub unix_mode: Option<u32> }
+
+pub struct JobCtx<'a> {
+    pub job_id: &'a str,                            // flow が割り当てた JobId(sidecar/body の名前空間)
+    pub params: &'a BTreeMap<String, toml::Value>,  // 既定 + --param <JobId>.* 上書き後の検証済み
+    pub inputs: &'a BTreeMap<&'static str, String>, // 入力名 → flow が解決した "$JM_FLOW_DIR/<producer>/..." パス
+    pub uuid: &'a Uuid, pub created_at: &'a str,
 }
 
-pub trait Recipe: Send + Sync {
+pub trait JobTemplate: Send + Sync {
     fn name(&self) -> &'static str;
-    fn summary(&self) -> &'static str;
     fn params(&self) -> &'static [RecipeParam];
-    fn generate(&self, ctx: &RecipeCtx<'_>) -> Result<Vec<GeneratedFile>, RecipeError>;
+    fn inputs(&self) -> &'static [&'static str];    // 例: parse_g16_out -> ["gaussian_out"]
+    fn outputs(&self) -> &'static [(&'static str, &'static str)]; // (名前, JobId 内 relpath) 例: g16_opt -> [("gaussian_out","output/main.out")]
+    fn instantiate(&self, ctx: &JobCtx<'_>) -> Result<JobArtifacts, RecipeError>;
 }
-
-pub fn registry() -> Vec<Box<dyn Recipe>>;       // [Blank, G16OptParse]
-pub fn find(name: &str) -> Option<Box<dyn Recipe>>;
 ```
 
-`RecipeError`(`thiserror`): `UnknownParam{name}` / `ParamTypeMismatch{name,expected,got}` / `Internal(String)`。CLI で `anyhow` に載せ替え、候補列挙付きメッセージ。
+### 型(Flow 層)+ 合成アセンブラ
 
-### 動作シーケンス(`cmd_new`)
+```rust
+pub trait FlowRecipe: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn summary(&self) -> &'static str;
+    fn nodes(&self) -> &'static [(&'static str, &'static str)];  // (JobId, JobTemplate 名)
+    fn edges(&self) -> &'static [(&'static str, &'static str, &'static str)]; // (from, to, kind 例 "afterok")
+    fn wiring(&self) -> &'static [(&'static str, &'static str, &'static str, &'static str)];
+        // (consumer JobId, 入力名, producer JobId, producer 出力名)
+}
 
-1. `--list`: `registry()` を `name — summary` 出力で終了。
-2. レシピ解決: `recipe.unwrap_or("blank")` → `find()`。`None` → bail(候補列挙)。
-3. パラメータ: `recipe.params()` 既定値で `BTreeMap` を作り `--param` を型検証して上書き。未知キー / 型不整合 → bail。
-4. `--describe`: 解決済みパラメータ表を出力して終了(scaffold しない)。
-5. `--tag` パース(既存流用)。
-6. `uuid = Uuid::now_v7()`; `resolver = PathResolver::new(root)`; `flow_dir = resolver.flow_dir(&uuid)`; 衝突確認(`exists()` なら bail、リトライしない)。
-7. `created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)`。
-8. `recipe.generate(&ctx)?` → `Vec<GeneratedFile>`。レシピは内部で flow JobId 集合 == plan `[jobs.*]` キー集合を保証(doctor-clean by construction)。
-9. `create_dir_all(&flow_dir)`。各 `GeneratedFile` の親(`input/`・`scripts/`)を `create_dir_all` し `atomic_write_str` で書く。`unix_mode` 指定時は rename 前 `chmod`(Unix-only)。
-10. いずれか失敗時: 作成済み `flow_dir` を `remove_dir_all` で巻き戻して `?` 伝播。
-11. 出力(既存形踏襲、asset 込み列挙):
+pub fn flow_registry() -> Vec<Box<dyn FlowRecipe>>;     // [Blank, G16OptParse]
+pub fn find_flow(name: &str) -> Option<Box<dyn FlowRecipe>>;
+pub fn find_job(name: &str) -> Option<Box<dyn JobTemplate>>; // jobs レジストリ(内部)
+```
+
+**アセンブラ `flow::assemble(recipe, raw_params, tags, uuid, created_at) -> Result<Vec<GeneratedFile>>`**:
+
+1. `recipe.nodes()` 各 `(job_id, tmpl)` を `find_job(tmpl)` 解決(未知は内部エラー = レシピ定義バグ)。
+2. `--param` を `<JobId>.<param>` でパース → JobId ごとに分配。各ノードの `JobTemplate.params()` 既定で埋め、型検証して上書き。未知 JobId / 未知 param / 型不整合 → bail。
+3. `recipe.wiring()` 解決:consumer の各入力名に対し `"$JM_FLOW_DIR/<producer JobId>/<producer 出力 relpath>"` を計算し `JobCtx.inputs` へ。producer 出力名は producer の `JobTemplate.outputs()` から引く。
+4. 各ノード `JobTemplate.instantiate(&ctx)?` → `JobArtifacts`。
+5. **flow.toml 組立**:`jobs.<JobId>` = {program, body, config(`partition="REPLACE_ME"` + `time_limit`)}、`recipe.edges()` から `[[jobs.<to>.parents]] from=<from> kind=<kind>`。
+6. **plan.toml 組立**:`[jobs.<JobId>]` = そのノードの `plan_params`。ノード集合から構築するため **flow JobId 集合 == plan キー集合 を構造的に保証**(doctor-clean by construction)。
+7. sidecars(既に `<JobId>/...` 名前空間化)+ flow.toml + plan.toml を `Vec<GeneratedFile>` で返す。
+
+JobTemplate は peer の JobId をハードコードしない(wiring は FlowRecipe がデータで宣言)→ **再利用可能**。将来 `g16-opt-freq-parse` 等は既存 JobTemplate を並べる FlowRecipe 1 個で済む。
+
+### `cmd_new` シーケンス
+
+1. `--list`: `flow_registry()` を `name — summary` 出力で終了。
+2. flow 解決: `recipe.unwrap_or("blank")` → `find_flow()`。`None` → bail(候補列挙)。
+3. `--describe`: ノードと `<JobId>.<param>` 表(JobTemplate.params 由来)を出力して終了。
+4. `--tag` パース(既存流用)。
+5. `uuid = Uuid::now_v7()`; `resolver = PathResolver::new(root)`; `flow_dir = resolver.flow_dir(&uuid)`; 衝突確認(`exists()` なら bail、リトライしない)。
+6. `created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)`。
+7. `flow::assemble(...)?` → `Vec<GeneratedFile>`。
+8. `create_dir_all(&flow_dir)`。各 `GeneratedFile` の親(`<JobId>/input` 等)を `create_dir_all` し `atomic_write_str`。`unix_mode` 指定時 rename 前 `chmod`(Unix-only)。
+9. いずれか失敗時:作成済み `flow_dir` を `remove_dir_all` で巻き戻して `?` 伝播。
+10. 出力(asset 込み列挙):
     ```
     created flow <uuid> from recipe g16-opt-parse
       <root>/<uuid>/flow.toml
       <root>/<uuid>/plan.toml
-      <root>/<uuid>/input/main.gjf
-      <root>/<uuid>/scripts/parse_results.py
-    next: edit input/main.gjf (geometry block), set a real partition +
-          cluster env in flow.toml, then `jm --root <root> render <uuid>`
+      <root>/<uuid>/opt/input/main.gjf
+      <root>/<uuid>/parse/scripts/parse_results.py
+    next: edit opt/input/main.gjf (geometry), set partition + cluster env in
+          flow.toml, then `jm --root <root> render <uuid>`
     ```
     `--print-path` 時は `<root>/<uuid>` の 1 行のみ。
 
-## 5. flow パス解決(R4)— submit 経路 `cmd.env` 注入
+## 5. flow パス解決(R4)+ body 規約
 
 ### 制約(実コード確認済み)
 
-- `render_batch_bash`(`src/render/mod.rs`)はジョブに `JM_FLOW_UUID`/`JM_JOB_ID`/`JM_AXIS_*`/`JM_PARAM_*` のみ export。flow ディレクトリパスも `cd` も注入しない。
-- `src/runner/flow.rs:268` の `SbatchCmd` 構築で `cmd.chdir` 未設定 → ジョブ cwd は flow dir でない。`examples/full` も絶対ログパスで「保証 cwd 無し」が既存前提。
-- `render_batch_bash` は `src/lib.rs:38` 公開 + `src/py_export/render.rs`/`mod.rs:103` で Python エクスポート。シグネチャ変更は公開 API + PyO3 境界破壊 + `.pyi` 再生成を伴う。
+`render_batch_bash` はジョブに `JM_FLOW_UUID`/`JM_JOB_ID`/`JM_AXIS_*`/`JM_PARAM_*` のみ export、flow dir パスも `cd` も注入しない。`src/runner/flow.rs:268` で `cmd.chdir` 未設定 → ジョブ cwd は flow dir でない。`render_batch_bash` は公開 API + Python エクスポート(シグネチャ変更は破壊 + `.pyi` 再生成)。
 
-### 採用: R4(submit 経路で `SbatchCmd.env` に `JM_FLOW_DIR` 注入)
+### 採用:R4(submit 経路で `SbatchCmd.env` に `JM_FLOW_DIR` 注入)
 
-A1 `SbatchCmd.env` は `build_argv()` で `--export=ALL,K=V,...`(`slurm-async-runner2/src/sbatch/cmd.rs:133-134`)。`ALL` 付きで投入環境を保ったまま追加環境変数をジョブへ渡せる。`src/runner/flow.rs` submit 経路に 1 行:
+A1 `SbatchCmd.env` は `build_argv()` で `--export=ALL,K=V,...`(`cmd.rs:133-134`)。`src/runner/flow.rs` submit 経路に 1 行:
 
 ```rust
-cmd.env.insert(
-    "JM_FLOW_DIR".into(),
-    self.resolver.flow_dir(&fr.flow_uuid).to_string_lossy().into_owned(),
-);
+cmd.env.insert("JM_FLOW_DIR".into(),
+    self.resolver.flow_dir(&fr.flow_uuid).to_string_lossy().into_owned());
 ```
 
-公開 API / PyO3 / `.pyi` 不変、`render_batch_bash` 不変、cwd 契約不変、既存 flow は新 env を無視(純加算)。DryRun/Mock は exec せず無影響(Mock はコール記録のみ、テストで `cmd.env` assert 可)。
+公開 API / PyO3 / `.pyi` / `render_batch_bash` / cwd 契約すべて不変、既存 flow は新 env 無視(純加算)。DryRun/Mock は exec せず無影響。
 
 | 案 | 公開API/PyO3 | cwd契約 | 既存flow | 判定 |
 |---|---|---|---|---|
-| R1: render シグネチャ変更 export | 破壊 | 不変 | 加算 | 却下 |
-| R2: `cmd.chdir=Some(flow_dir)` | 不変 | 全ジョブ変更 | 挙動変更 | 却下 |
-| **R4: submit `cmd.env` 注入(採用)** | 不変 | 不変 | 加算 | **採用** |
-| R3: scaffold 時 絶対パス埋込 | 不変 | 不変 | 加算 | 却下(移動/コピー破綻) |
+| R1: render シグネチャ変更 | 破壊 | 不変 | 加算 | 却下 |
+| R2: `cmd.chdir=Some` | 不変 | 全ジョブ変更 | 挙動変更 | 却下 |
+| **R4: submit env 注入(採用)** | 不変 | 不変 | 加算 | **採用** |
+| R3: scaffold 時 絶対パス埋込 | 不変 | 不変 | 加算 | 却下(移動破綻) |
 
-`JM_ROOT` 形は CLI 入力 env と同名 2 役の意味過負荷 + body join が必要なため不採用(将来 root 横断が要れば別途追加可)。
+`JM_ROOT` 形は CLI 入力 env と同名 2 役の意味過負荷 + join 必要のため不採用。
 
-### recipe body 規約: 先頭で `cd "$JM_FLOW_DIR"`
+### body 規約: 先頭で `cd "$JM_FLOW_DIR/<JobId>"`
 
-domain レシピの `body` は先頭で `cd "$JM_FLOW_DIR"`。これで `input/main.gjf` 等を相対で書け、Gaussian の `%rwf`/`%chk` 相対副生成物・`output/` も flow dir に落ちる(`--chdir`(R2)不要)。
+二層化により各ジョブは **自分の JobId サブディレクトリ**で動く。JobArtifacts.body 先頭は `cd "$JM_FLOW_DIR/<JobId>"`。これで `input/main.gjf` を相対参照でき、Gaussian `%rwf`/`%chk` 相対副生成物・`output/`/`derived/` がそのジョブの名前空間に落ち、合成時 sidecar 衝突が構造的に起きない。クロスジョブ入力は wiring が解決した絶対形 `"$JM_FLOW_DIR/<producer>/output/main.out"` を body に焼き込む。
 
 ### 既知の小制約
 
-A1 `render_export` は env キー/値に `,`/`=` を含むと拒否(`cmd.rs` テスト `BAD,KEY`/`BAD=KEY` 確認)。flow dir パスに通常含まれないが、`,`/`=` を含む root では `JM_FLOW_DIR` 注入が `SbatchSpawnError`。極めて稀。spec 既知制約として明記(将来の `jm doctor` 警告は別 spec)。
+A1 `render_export` は env キー/値に `,`/`=` を含むと拒否。flow dir パスに通常無いが、含む root では `JM_FLOW_DIR` 注入が `SbatchSpawnError`。極稀。spec 既知制約として明記(将来 `jm doctor` 警告は別 spec)。
 
-## 6. リファレンス整合マッピング(gem ↔ job-manager)
+## 6. リファレンス整合マッピング(gem ↔ job-manager 二層)
 
-| gem(確立規約) | job-manager 表現(本レシピ) |
+| gem(確立規約) | job-manager 二層表現 |
 |---|---|
-| `[[step]] program="gaussian" calc_type="opt"` + post `gaussian-parse-results` | `flow.toml` 2-job: `[jobs.opt] program="g16"` → afterok → `[jobs.parse] program="python"` |
-| `[step.params] route/charge/multiplicity/extra_input` | `plan.toml [jobs.opt]` に同名で格納(`JM_PARAM_*` にも露出)。scaffold 時 `input/main.gjf` へ差込 |
-| `common.toml [slurm]` / `[slurm.post]`(post 用 override) | `flow.toml [jobs.opt.config]`(大きめ) / `[jobs.parse.config]`(小さめ)。`partition="REPLACE_ME"` 両方(common 非関与) |
-| `[env].task_basename = "main"`、`<uuid>/{input,output,derived}/` | flow dir 配下 `input/main.gjf`、body が `output/main.out`/`derived/` を作る。`task_basename` は `main` 固定(YAGNI) |
-| `gaussian-run-g16 --config --uuid`(B のラッパ) | `jm` には当該 CLI/config 無し → body で `g16 input/main.gjf output/main.out` を直接実行 |
-| `gaussian-parse-results`(C, cclib, 終端 status 書込) | body で `python scripts/parse_results.py output/main.out`。**status は job-manager の Lifecycle/tick が権威**、parse は exit code で success/fail |
-| InChIKey compound(`compounds=[...]`、gjf title) | `--param compound=<InChIKey>`(既定 sentinel)。gjf title 行に使用。`[tags]` にも記録 |
-| `[[sweep]]` / `parent_uuids` 連鎖 | **非対象**(CLAUDE.md Out of scope。単一 opt→parse のみ) |
+| step program `gaussian` (`gaussian-run-g16`) | **JobTemplate `g16_opt`**(program=`g16`) |
+| post program `gaussian-parse-results`(cclib) | **JobTemplate `parse_g16_out`**(program=`python`) |
+| step 連鎖 + afterok(main→post) | **FlowRecipe `g16-opt-parse`**:nodes `[(opt,g16_opt),(parse,parse_g16_out)]`、edges `[(opt,parse,afterok)]` |
+| `[step.params] route/charge/multiplicity/extra_input` | `g16_opt` の `params()`。CLI `--param opt.route=...`。`plan.toml [jobs.opt]` に格納(`JM_PARAM_*` 露出) |
+| `parent_uuids`(出力→次入力 consume) | FlowRecipe `wiring()`:`(parse,gaussian_out,opt,gaussian_out)`。flow 内明示・JobId 非ハードコード |
+| `common.toml [slurm]` / `[slurm.post]` | `[jobs.opt.config]`(time 48h)/ `[jobs.parse.config]`(time 1h)。partition 両方 `REPLACE_ME` |
+| `[env].task_basename=main`、`<uuid>/{input,output,derived}/` | flow 内 **`<JobId>/{input,output,derived}/`**(1 ジョブ ≈ 1 gem calc)、`main` 固定 |
+| InChIKey compound(gjf title) | `--param opt.compound=<InChIKey>`(既定 sentinel)。gjf title + `[tags].compound` |
+| status ファイル(post が権威) | job-manager Lifecycle/tick が権威。parse は exit code のみ |
+| `[[sweep]]` / 多段連鎖 | 非対象(CLAUDE.md Out of scope) |
 
-## 7. `g16-opt-parse` レシピ詳細
+## 7. v1 JobTemplate / FlowRecipe 詳細
 
-### パラメータ(gem `[step.params]` 語彙に整合)
+### JobTemplate `g16_opt`
+
+- `params()`(gem `[step.params]` 語彙):
 
 | name | type | default | help |
 |---|---|---|---|
-| `route` | str | `#p opt b3lyp/6-31g(d)` | Gaussian route 行(複数行可。gem 同様まるごと 1 文字列) |
+| `route` | str | `#p opt b3lyp/6-31g(d)` | Gaussian route 行(複数行可、まるごと 1 文字列) |
 | `charge` | int | `0` | 全電荷 |
 | `multiplicity` | int | `1` | スピン多重度 |
-| `extra_input` | str | `` (空) | charge/mult・geometry の後に付す追加入力(gem `extra_input`。connectivity 補助行など) |
-| `nproc` | int | `8` | `%nprocshared`(gem は common の resource_spec.t 由来。job-manager は common 非関与のため明示パラメータ) |
+| `extra_input` | str | `` | charge/mult・geometry の後の追加入力 |
+| `nproc` | int | `8` | `%nprocshared`(gem は common 由来、job-manager は common 非関与のため明示) |
 | `mem` | str | `8GB` | `%mem` |
-| `compound` | str | `REPLACE_ME-INCHIKEY` | InChIKey。gjf title 行 + `[tags].compound` に使用 |
+| `compound` | str | `REPLACE_ME-INCHIKEY` | InChIKey。gjf title + `[tags].compound` |
 
-`route`/`%chk=main.chk`/`%rwf=main.rwf` は gem 形式準拠。geometry は発明不能のため sentinel。
+- `inputs()` = `[]`(root。geometry は sentinel)。`outputs()` = `[("gaussian_out","output/main.out")]`。
+- `instantiate`:program `"g16"`、`time_limit "48:00:00"`、sidecar `<JobId>/input/main.gjf`(下記、`{{}}` 差込、geometry sentinel)、`plan_params` = 上記パラメータ、body:
+  ```
+  cd "$JM_FLOW_DIR/<JobId>"
+  # --- cluster environment (EDIT for your site; CLAUDE.md HPC notes) ---
+  # REPLACE_ME: e.g. `module load gaussian` / `conda activate <env>`
+  mkdir -p output
+  g16 input/main.gjf output/main.out
+  ```
+- `<JobId>/input/main.gjf`(gem 形式):
+  ```
+  %rwf=main.rwf
+  %nprocshared={{nproc}}
+  %mem={{mem}}
+  %chk=main.chk
+  {{route}}
 
-### 生成物
+  {{compound}}
 
-**`flow.toml`**(§5 body 規約 + gem の opt(大)/post(小)config 差を反映):
+  {{charge}} {{multiplicity}}
+  <GEOMETRY: REPLACE_ME — 1行1原子 `Element  x  y  z`。route に geom=connectivity を
+  含めるなら空行後に connectivity ブロック>
+  {{extra_input}}
+  ```
 
-```toml
-# Generated by `jm new g16-opt-parse` on <rfc3339>.
-uuid       = "<uuid>"
-created_at = "<rfc3339>"
+### JobTemplate `parse_g16_out`
 
-[tags]
-recipe   = "g16-opt-parse"
-compound = "<compound>"
-# --tag k=v も反映
+- `params()` = `[]`(v1 はユーザパラメータ無し)。`inputs()` = `["gaussian_out"]`。`outputs()` = `[]`(`derived/main.mol2` 出力は §下記 TODO 拡張点)。
+- `instantiate`:program `"python"`、`time_limit "01:00:00"`、sidecar `<JobId>/scripts/parse_results.py`、`plan_params` = `{ note = "cclib parse + convergence/energy validation" }`、body:
+  ```
+  cd "$JM_FLOW_DIR/<JobId>"
+  # REPLACE_ME: activate the python env that has `cclib`
+  python scripts/parse_results.py "{{inputs.gaussian_out}}"
+  ```
+  (`{{inputs.gaussian_out}}` は wiring が `"$JM_FLOW_DIR/opt/output/main.out"` に解決)
+- `scripts/parse_results.py`(cclib。沈黙成功を避ける実 pass/fail):
+  - 引数:Gaussian `.out` パス。`cclib` import 失敗時は明示メッセージで **exit 2**(沈黙しない honest failure)。
+  - 実 pass/fail:(a) cclib でパース不可 → exit 1、(b) 正常終了マーカ無し → exit 1、(c) opt 収束フラグ False → exit 1、(d) 最終エネルギーが有限実数で取れない → exit 1、すべて満たせば exit 0。検証済/未検証を stdout 明記。
+  - `# TODO(jm recipe): write derived/main.mol2`(gem `derived/main.mol2` 相当)を明示拡張点に(v1 は (a)-(d) を本質、derived 出力は任意)。
+  - status は job-manager Lifecycle/tick が権威。本スクリプトは exit code のみ。
 
-[jobs.opt]
-program = "g16"
-body = """
-cd "$JM_FLOW_DIR"
-# --- cluster environment (EDIT for your site; see CLAUDE.md HPC notes) ---
-# REPLACE_ME: e.g. `module load gaussian` / `conda activate <env>`
-mkdir -p output
-g16 input/main.gjf output/main.out
-"""
-[jobs.opt.config]
-partition  = "REPLACE_ME"
-time_limit = "48:00:00"
+### FlowRecipe `g16-opt-parse`
 
-[jobs.parse]
-program = "python"
-body = """
-cd "$JM_FLOW_DIR"
-# REPLACE_ME: activate the python env that has `cclib`
-python scripts/parse_results.py output/main.out
-"""
-[[jobs.parse.parents]]
-from = "opt"
-kind = "afterok"
-[jobs.parse.config]
-partition  = "REPLACE_ME"
-time_limit = "01:00:00"
-```
+- `nodes()` = `[("opt","g16_opt"), ("parse","parse_g16_out")]`
+- `edges()` = `[("opt","parse","afterok")]`
+- `wiring()` = `[("parse","gaussian_out","opt","gaussian_out")]`
+- 生成 `flow.toml`(抜粋):
+  ```toml
+  uuid = "<uuid>"
+  created_at = "<rfc3339>"
+  [tags]
+  recipe   = "g16-opt-parse"
+  compound = "<opt.compound>"
 
-**`plan.toml`**(flow JobId 集合と一致。gem `[step.params]` 語彙でパラメータ記録=軽量な由来 + `JM_PARAM_*` 露出):
+  [jobs.opt]
+  program = "g16"
+  body = """cd "$JM_FLOW_DIR/opt"
+  # REPLACE_ME cluster env
+  mkdir -p output
+  g16 input/main.gjf output/main.out
+  """
+  [jobs.opt.config]
+  partition  = "REPLACE_ME"
+  time_limit = "48:00:00"
 
-```toml
-[jobs.opt]
-route        = "#p opt b3lyp/6-31g(d)"
-charge       = 0
-multiplicity = 1
-extra_input  = ""
-nproc        = 8
-mem          = "8GB"
-
-[jobs.parse]
-note = "cclib parse + convergence/energy validation of output/main.out"
-```
-
-**`input/main.gjf`**(gem 形式。scaffold 時 `{{...}}` 差込、geometry は sentinel):
-
-```
-%rwf=main.rwf
-%nprocshared={{nproc}}
-%mem={{mem}}
-%chk=main.chk
-{{route}}
-
-{{compound}}
-
-{{charge}} {{multiplicity}}
-<GEOMETRY: REPLACE_ME — 1行1原子で `Element  x  y  z`。route に geom=connectivity を
-含める場合は空行後に connectivity ブロックを記入>
-{{extra_input}}
-```
-
-**`scripts/parse_results.py`**(cclib ベース。沈黙成功を避ける実 pass/fail):
-
-- 引数: `output/main.out` パス。
-- 依存: `cclib`(import 失敗時は `cclib not installed` を明示し exit 2 — 沈黙しない honest failure)。
-- **実 pass/fail**:
-  - (a) cclib で `.out` をパースできなければ exit 1(切断/破損)。
-  - (b) Gaussian 正常終了マーカが無ければ exit 1。
-  - (c) opt: 幾何収束フラグ(`ccData` の最適化収束)が False なら exit 1。
-  - (d) 最終 SCF/全エネルギーが有限実数で取得できなければ exit 1。
-  - すべて満たせば exit 0。検証済み/未検証項目を stdout に明記。
-- **任意の派生生成(gem `derived/main.mol2` 相当)**: パース幾何を `derived/main.mol2` に書く処理を `# TODO(jm recipe): write derived/main.mol2` として明示拡張点に(v1 は (a)-(d) の pass/fail を本質とし、derived 出力は任意)。
-- job-manager の Lifecycle/tick が status の権威。本スクリプトは exit code のみで success/fail を表す(gem の status ファイル再実装はしない)。
+  [jobs.parse]
+  program = "python"
+  body = """cd "$JM_FLOW_DIR/parse"
+  # REPLACE_ME python env w/ cclib
+  python scripts/parse_results.py "$JM_FLOW_DIR/opt/output/main.out"
+  """
+  [[jobs.parse.parents]]
+  from = "opt"
+  kind = "afterok"
+  [jobs.parse.config]
+  partition  = "REPLACE_ME"
+  time_limit = "01:00:00"
+  ```
+- 生成 `plan.toml`:
+  ```toml
+  [jobs.opt]
+  route = "#p opt b3lyp/6-31g(d)"
+  charge = 0
+  multiplicity = 1
+  extra_input = ""
+  nproc = 8
+  mem = "8GB"
+  [jobs.parse]
+  note = "cclib parse + convergence/energy validation"
+  ```
 
 ### 環境アクティベーション(sentinel)
 
-gem の生成 batch は `source ~/.bashrc; conda activate analysis; module restore <X> -f` を含むがこれはサイト固有。レシピは body 内に **`# REPLACE_ME` コメントの環境アクティベーション節**を置き、`partition=REPLACE_ME` と並ぶ「クラスタ別編集点」として明示(学習スキル `pixi-conda-stack-reset` / `slurm-module-purge-breaks-srun` の HPC 落とし穴を踏まない方針)。具体 `module`/`conda` 行はハードコードしない。
+gem 生成 batch の `source ~/.bashrc; conda activate; module restore` はサイト固有。body 内に `# REPLACE_ME` 環境節を置き `partition=REPLACE_ME` と並ぶクラスタ別編集点として明示(学習スキル `pixi-conda-stack-reset`/`slurm-module-purge-breaks-srun` の HPC 落とし穴回避方針)。具体行はハードコードしない。
 
-## 8. `blank` レシピ(後方互換)
+## 8. `blank` FlowRecipe(後方互換)
 
-既存 `build_flow_template` / `build_plan_template`(`src/bin/jm.rs:497-574`)を `src/recipes/blank.rs` の `Blank` へ移設。出力は **バイト同値**(既存 `tests/integration_new.rs` / `src/bin/jm.rs` ユニットテストがそのまま通る)。`jm new`(無引数)= `jm new blank`。`GeneratedFile` は flow.toml / plan.toml の 2 つのみ(`input/`・`scripts/` 無し)。
+既存 `build_flow_template`/`build_plan_template`(`src/bin/jm.rs:497-574`)を `flows/blank.rs` へ移設。**JobTemplate に分解せず**直接出力(`assemble()` を介さない経路、または blank 専用に flow.toml/plan.toml を直書き)し **既存 `jm new` 出力とバイト同値**を維持(`tests/integration_new.rs` / `src/bin/jm.rs` ユニットがそのまま通る)。`jm new`(無引数)= `jm new blank`。サイドカー無し(flow.toml/plan.toml の 2 ファイルのみ)。
 
 ## 9. エラーハンドリング
 
 | 状況 | 挙動 |
 |---|---|
-| 未知レシピ | `bail!("unknown recipe {name:?}; available: blank, g16-opt-parse")` |
-| `--param` に `=` 無し | `bail!("invalid --param: expected key=value, got {raw}")` |
-| 未知パラメータキー | `bail!("recipe {recipe}: unknown param {key}; valid: ...")` |
-| パラメータ型不整合 | `bail!("recipe {recipe}: param {key} expects {ty}, got {raw}")` |
-| `flow_dir` 既存(UUID 衝突) | `bail!("flow dir already exists: {path}")`(既存。リトライしない) |
-| asset 書込失敗 | 作成済み `flow_dir` を `remove_dir_all` で巻き戻して `?` 伝播 |
-| `--list` / `--describe` | scaffold せず終了(副作用なし) |
-| (実行時)`cclib` 未導入 | `parse_results.py` が明示メッセージで exit 2(沈黙しない) |
+| 未知 FlowRecipe | `bail!("unknown recipe {name:?}; available: blank, g16-opt-parse")` |
+| `--param` に `.` または `=` 欠落 | `bail!("invalid --param: expected <JobId>.<param>=<value>, got {raw}")` |
+| 未知 JobId(レシピノードに無い) | `bail!("recipe {flow}: no node {jobid}; nodes: opt, parse")` |
+| 未知 param / 型不整合 | `bail!("recipe {flow}: job {jobid}: unknown/typed param ...")` |
+| FlowRecipe が未知 JobTemplate を参照 | 内部エラー(レシピ定義バグ)。`registry()` 整合をユニットテストで保証 |
+| `flow_dir` 既存(UUID 衝突) | `bail!("flow dir already exists: {path}")`(リトライしない) |
+| sidecar 書込失敗 | 作成済み `flow_dir` を `remove_dir_all` 巻き戻し後 `?` 伝播 |
+| `--list`/`--describe` | scaffold せず終了 |
+| (実行時)`cclib` 未導入 | `parse_results.py` が明示 exit 2 |
 
 ## 10. テスト
 
-### ユニット(`src/recipes/**` の `#[cfg(test)] mod tests`)
+### ユニット(`src/recipes/**` `#[cfg(test)] mod tests`)
 
-- `Blank::generate` 出力が `JobFlow`/`ExperimentPlan` に直接パース、`{step1,step2}`、`step2.parents[0]={from:step1,kind:afterok}`、両 config `partition=="REPLACE_ME"`。**既存 `jm new` 出力とバイト同値**(回帰防止)。
-- `G16OptParse::generate`: flow JobId 集合 == plan キー集合 == `{opt, parse}`、`parse.parents[0]={from:opt,kind:afterok}`、両 config `partition=="REPLACE_ME"`、opt/parse の `time_limit` が gem 同様に非対称(48h / 1h)、両 body 先頭 `cd "$JM_FLOW_DIR"`。
-- `input/main.gjf`: `{{...}}` 残存無し、`--param route='#p opt pbe1pbe/def2svp' charge=1 multiplicity=2 nproc=16 mem=16GB compound=ABC` 反映、gem ヘッダ順(`%rwf`→`%nprocshared`→`%mem`→`%chk`→route→title→`charge mult`)、`<GEOMETRY: REPLACE_ME>` sentinel 存在。
-- パラメータ検証: 既定適用 / 型変換(int/float/bool)/ 未知キー Err / 型不整合 Err / `--param route=a=b` → value=`a=b`(複数 `=` は最初で分割、route に `=` 含む現実ケース)。
-- `registry()` に `blank`/`g16-opt-parse` を含み名前ユニーク。
+- **Job 層** `g16_opt.instantiate`:program `g16`、body 先頭 `cd "$JM_FLOW_DIR/<JobId>"`、sidecar relpath が `<JobId>/input/main.gjf`、gjf に `{{}}` 残存無し・gem ヘッダ順(`%rwf`→`%nprocshared`→`%mem`→`%chk`→route→title→`charge mult`)・`<GEOMETRY: REPLACE_ME>`、`outputs()`=`[("gaussian_out","output/main.out")]`。`--param` 反映(route に `=` を含む値で複数 `=` 分割確認)。
+- **Job 層** `parse_g16_out.instantiate`:program `python`、`inputs()`=`["gaussian_out"]`、body が `{{inputs.gaussian_out}}` 解決値を含む、sidecar `<JobId>/scripts/parse_results.py`。
+- **Flow 層** `assemble(g16-opt-parse)`:flow JobId 集合 == plan キー集合 == `{opt,parse}`、`parse.parents[0]={from:opt,kind:afterok}`、両 config `partition=="REPLACE_ME"`、time_limit 非対称(48h/1h)、parse body に `"$JM_FLOW_DIR/opt/output/main.out"` が焼き込まれている(wiring 解決)。
+- パラメータ宛先:`--param opt.charge=1` のみ opt に効き parse に影響しない。未知 JobId/param/型不整合 Err。
+- レジストリ整合:全 FlowRecipe の `nodes()` の JobTemplate 名が `find_job` で解決でき、`wiring()` の入出力名が両端 JobTemplate の `inputs()/outputs()` に存在(レシピ定義 lint をテストで)。
+- `blank` FlowRecipe:**既存 `jm new` 出力とバイト同値**(回帰防止)。
 
 ### 統合(`tests/integration_new_recipes.rs`, `assert_cmd`)
 
-- `jm new --list` が 2 レシピ列挙、exit 0、scaffold 無し。
-- `jm new g16-opt-parse --describe` がパラメータ表出力、exit 0、scaffold 無し。
-- `jm new g16-opt-parse --param charge=1` → `flow.toml`/`plan.toml`/`input/main.gjf`/`scripts/parse_results.py` 生成、gjf に `1 1` 反映。
-- 生成 flow が **doctor-clean**: `jm doctor <uuid>` exit 0(`input/`・`scripts/` の存在が doctor を壊さない — doctor は TOML パース + plan 網羅 + uuid/dir + parents + log dir のみ検査し未知ファイルを拒否しないことを確認)。
-- `jm new g16-opt-parse` → `jm render <uuid>` exit 0(ラウンドトリップ。`partition=REPLACE_ME` で render は通る)。
-- 後方互換: `jm new`(無引数)と `jm new blank` が同一出力で既存 `jm new` 期待値と一致。`--print-path` / `--tag env=prod` 既存挙動維持。
-- 未知レシピ `jm new nope` が exit 非 0 + 候補列挙。
+- `jm new --list` が `blank`/`g16-opt-parse` 列挙、exit 0、scaffold 無し。
+- `jm new g16-opt-parse --describe` が `opt.route`/`opt.charge`/... を列挙、exit 0、scaffold 無し。
+- `jm new g16-opt-parse --param opt.charge=1` → `flow.toml`/`plan.toml`/`opt/input/main.gjf`/`parse/scripts/parse_results.py` 生成、gjf に `1 1`。
+- 生成 flow が **doctor-clean**:`jm doctor <uuid>` exit 0(`<JobId>/` サブツリーが doctor を壊さないことを確認)。
+- `jm new g16-opt-parse` → `jm render <uuid>` exit 0(ラウンドトリップ)。
+- 後方互換:`jm new` ≡ `jm new blank` ≡ 既存期待値。`--print-path`/`--tag` 既存挙動維持。
+- 未知レシピ exit 非 0 + 候補列挙。
 
-### submit 経路(`src/runner/flow.rs` テスト / `tests/integration_sp3.rs`)
+### submit 経路(`src/runner/flow.rs` / `tests/integration_sp3.rs`)
 
-- `MockExecutor` で submit し、記録 `SbatchCmd.env["JM_FLOW_DIR"]` が `resolver.flow_dir(uuid)` 絶対パスに一致(R4 回帰)。
-- `cmd.chdir` が依然 `None`(R2 不採用回帰)。
+- `MockExecutor` 記録 `SbatchCmd.env["JM_FLOW_DIR"]` == `resolver.flow_dir(uuid)` 絶対パス(R4 回帰)。`cmd.chdir` 依然 `None`(R2 不採用回帰)。
 
 ### Python smoke(`python/tests`)
 
-- `examples/replica/ROSDSFDQCJNGOL-UHFFFAOYSA-O/main.out` 形の正常終了フィクスチャで `parse_results.py` exit 0、未収束/切断フィクスチャで exit 1、`cclib` 不在で exit 2。
+- 正常終了 `.out` フィクスチャで `parse_results.py` exit 0、未収束/切断で exit 1、`cclib` 不在で exit 2。
 
-`MockExecutor`/`InMemoryQuerier` 使用、live SLURM 不要(CLAUDE.md 準拠)。
+`MockExecutor`/`InMemoryQuerier` 使用、live SLURM 不要。
 
-## 11. CLAUDE.md 準拠チェック
+## 11. CLAUDE.md 準拠
 
-- `flow.toml`/`plan.toml`/`input/main.gjf`/`scripts/parse_results.py` は user-authored 入力の **初回 bootstrap のみ**。runtime(render/submit/tick)は依然 `.jm/` 配下しか書かない(`jm new` spec §9 の bootstrap 容認を sidecar に拡張)。
-- `jm` `--no-default-features` 必須 → `src/recipes/` は pyo3 非依存。
-- アトミック書込(PID サフィックス tmp + rename)を全生成ファイルで踏襲。
-- Out of scope(DSL / sweep / per-flow common / TUI / リモートレジストリ / OpenMM)に抵触しない。利用者はトポロジを書かず名前付きレシピ + スカラパラメータのみ。
-- 公開 API は追加のみ(`recipes` モジュール re-export)。`render_batch_bash` 含む既存公開 API / PyO3 境界 / `.pyi` を変更しない(R4 採用根拠)。
-- レシピは gem の**ドメイン意味論**(route/charge/multiplicity/extra_input、opt→afterok→parse、gjf 形式、input/output/derived)を写すが、**スキーマは job-manager の `flow.toml`/`plan.toml`**(gem 形式は採用しない)。status の権威は job-manager の Lifecycle/tick(gem `status` 非再実装)。
+- 生成物は user-authored 入力の **初回 bootstrap のみ**。runtime は `.jm/` 配下しか書かない(`jm new` spec §9 bootstrap 容認の sidecar 拡張)。
+- `jm` `--no-default-features` → `src/recipes/` pyo3 非依存。
+- 原子書込(PID サフィックス tmp + rename)を全生成ファイルで踏襲。
+- Out of scope(DSL/sweep/per-flow common/TUI/リモートレジストリ/OpenMM/JobTemplate 直接 scaffold)非抵触。
+- 公開 API は追加のみ。`render_batch_bash`/PyO3/`.pyi` 不変(R4 根拠)。
+- gem の**意味論**を二層で写すが**スキーマは job-manager**。status は Lifecycle/tick が権威。
 - Conventional Commits / per-task commit / stacked PR。
 
 ## 12. トレードオフ要約
 
 | 論点 | 採用 | 却下 | 理由 |
 |---|---|---|---|
-| post(検証)中身 | parse-results 規約(cclib, .out 検証, exit code) | OpenMM / 両立 | エコシステムに OpenMM 前例ゼロ、確立実装は cclib parse。ユーザ判断 |
-| パラメータ語彙 | gem `route`/`charge`/`multiplicity`/`extra_input`(+ nproc/mem/compound) | method/basis 分割(rev.1 発明) | 既存規約整合、route 行まるごとが gem 流儀 |
-| ファイルレイアウト | gem `input/main.gjf` + `output/`/`derived/`(`task_basename=main`) | rev.1 `assets/opt.gjf` | 既存規約整合、化学者の慣れたレイアウト |
-| status 権威 | job-manager Lifecycle/tick(parse は exit code のみ) | gem `status` 再実装 | 二重実装回避、job-manager の責務分担に整合 |
-| レシピ定義 substrate | B: Rust 型付きレジストリ | A: ファイルテンプレ / C: リモート | doctor-clean by construction、型検証、単一チーム |
-| CLI 表面 | 1c: `jm new [<recipe>]` 位置引数 | 別コマンド / `--recipe` フラグ | 単一メンタルモデル、既存配管再利用 |
-| 配置 | `src/recipes/`(同 package) | 別 crate | doctor/型と密結合で保証最強 |
-| flow パス解決 | R4: submit `cmd.env` 注入 `JM_FLOW_DIR` | R1/R2/R3/`JM_ROOT` | 公開 API/PyO3/cwd 契約すべて不変、加算のみ |
-| common.toml | 非関与(`partition=REPLACE_ME` sentinel) | gem common 採用 | 既存 `jm new` deferred-common 踏襲、事故源回避 |
+| テンプレ層 | **二層(JobTemplate / FlowRecipe)** | 単一 Recipe(rev.2) | 再利用(JobTemplate 並べ替えで新 flow)、nf-core/Snakemake/atomate/gem 全て二層 |
+| Job 層 CLI 公開 | Flow 層のみ scaffold 可能 | JobTemplate も直接 | CLI 表面最小、YAGNI(ユーザ判断) |
+| パラメータ宛先 | `--param <JobId>.<param>` | フラット | `plan.toml [jobs.<JobId>]` 1:1、同種ジョブ複数で衝突せず、gem per-step 整合 |
+| sidecar 配置 | `<JobId>/{input,output,derived,scripts}/` | フラット `input/main.gjf` | 多ジョブ 1 flow dir で衝突を構造排除、gem `<uuid>/{input,...}` を写す |
+| クロスジョブ参照 | FlowRecipe `wiring()` がパス解決 | JobTemplate に peer 焼込 | JobTemplate を再利用可能に(peer 非依存) |
+| post 中身 | parse-results 規約(cclib) | OpenMM | エコシステム前例ゼロ、ユーザ判断 |
+| status 権威 | job-manager Lifecycle/tick | gem status 再実装 | 二重実装回避 |
+| flow パス解決 | R4: submit env `JM_FLOW_DIR` | R1/R2/R3/JM_ROOT | 公開 API/PyO3/cwd すべて不変 |
+| common.toml | 非関与(partition REPLACE_ME) | gem common 採用 | 既存 deferred-common 踏襲 |
+| `blank` | FlowRecipe 据置(非分解) | JobTemplate 分解 | バイト同値要件を最小リスクで |
