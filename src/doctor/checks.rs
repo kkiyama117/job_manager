@@ -18,7 +18,9 @@ use gaussian_job_shared::config::common::CommonConfig;
 use gaussian_job_shared::entities::workflow::JobFlow;
 
 use crate::error::JobManagerError;
-use crate::persistence::{read_flow, read_flow_effective, read_job_run, read_plan};
+use crate::persistence::{
+    merge_with_defaults, read_flow, read_flow_effective, read_job_run, read_plan,
+};
 use crate::plan::ExperimentPlan;
 
 use super::report::Finding;
@@ -179,6 +181,49 @@ pub fn check_plan_coverage(flow_dir: &Path, flow: &JobFlow) -> Vec<Finding> {
     out
 }
 
+/// `log_stdout`/`log_stderr` must resolve into a directory that already
+/// exists: `sbatch` does **not** create the `--output`/`--error` parent
+/// directory, so a missing one makes SLURM fail to open the file and the
+/// job dies as `FAILED` before its body runs — with no useful sacct
+/// reason. The merged (common + per-job) value is what reaches `sbatch`,
+/// so we evaluate exactly that via `merge_with_defaults`.
+///
+/// Always WARN, never FAIL — `jm doctor` stays advisory here. Path
+/// resolution (relative → `<root>`, `%x`/`%j` token stripping) is shared
+/// with the `jm submit` fail-fast preflight via
+/// [`crate::slurm::logpath::missing_log_dirs`], so the two never drift.
+pub fn check_log_dirs_exist(
+    root: &Path,
+    flow_dir: &Path,
+    flow: &JobFlow,
+    common: &CommonConfig,
+) -> Vec<Finding> {
+    let path = flow_dir.join("flow.toml");
+    let mut out = Vec::new();
+    for (jid, job) in &flow.jobs {
+        let merged = merge_with_defaults(common, &job.spec.config);
+        for (field, dir) in crate::slurm::logpath::missing_log_dirs(root, &merged) {
+            out.push(Finding::warn(
+                &path,
+                format!(
+                    "job {:?}: {field} parent dir {} does not exist. sbatch does \
+                     not create it; SLURM will fail the job before it runs. \
+                     `mkdir -p` it or fix the path.",
+                    jid.0,
+                    dir.display(),
+                ),
+            ));
+        }
+    }
+    if out.is_empty() {
+        out.push(Finding::pass(
+            &path,
+            "log_stdout/log_stderr parent directories exist (or unset)",
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,5 +363,110 @@ kind = "afterok"
         std::fs::write(d.path().join("plan.toml"), "[jobs.other]\nx=1\n").unwrap();
         let fs = check_plan_coverage(d.path(), &flow);
         assert!(fs.iter().any(|f| f.severity == Severity::Warn));
+    }
+
+    /// `CommonConfig` whose `[slurm_default]` carries the given log paths;
+    /// every other field empty. Mirrors the on-disk shape jobs inherit
+    /// when `[jobs.*.config]` omits `log_stdout`/`log_stderr`.
+    fn common_with_logs(stdout: Option<&str>, stderr: Option<&str>) -> CommonConfig {
+        let mut c = synth_empty_common();
+        c.slurm_default.partition = "long".to_string();
+        c.slurm_default.log_stdout = stdout.map(std::path::PathBuf::from);
+        c.slurm_default.log_stderr = stderr.map(std::path::PathBuf::from);
+        c
+    }
+
+    #[test]
+    fn log_dirs_warn_when_absolute_parent_missing() {
+        // The real prod bug: log_stdout points into a directory that does
+        // not exist. sbatch will not create it; SLURM marks the job FAILED
+        // before the body runs. The %x/%j tokens live in the filename so
+        // the directory component is literal and stat-able.
+        let d = tempdir().unwrap();
+        let missing = d
+            .path()
+            .join("no_such/managed/logs/%x.%j.out")
+            .to_string_lossy()
+            .into_owned();
+        let common = common_with_logs(Some(&missing), None);
+        std::fs::write(d.path().join("flow.toml"), GOOD_FLOW).unwrap();
+        let (flow, _) = check_flow(d.path(), &common);
+        let flow = flow.expect("fixture flow should parse");
+
+        let fs = check_log_dirs_exist(d.path(), d.path(), &flow, &common);
+
+        assert!(
+            fs.iter()
+                .any(|f| f.severity == Severity::Warn && f.message.contains("does not exist")),
+            "expected a WARN about the missing log parent dir, got: {fs:?}"
+        );
+        assert!(
+            !fs.iter().any(|f| f.severity == Severity::Fail),
+            "doctor log-dir check must stay advisory (never FAIL), got: {fs:?}"
+        );
+    }
+
+    #[test]
+    fn log_dirs_warn_when_relative_parent_missing_under_root() {
+        // The exact prod value: a leading-slash typo makes the path
+        // relative. doctor resolves a relative log dir against <root>
+        // and still asserts existence — no "cannot be verified" escape.
+        let d = tempdir().unwrap();
+        let common = common_with_logs(Some("LARGE0/gr10641/.cache/managed/logs/%x.%j.out"), None);
+        std::fs::write(d.path().join("flow.toml"), GOOD_FLOW).unwrap();
+        let (flow, _) = check_flow(d.path(), &common);
+        let flow = flow.expect("fixture flow should parse");
+
+        let fs = check_log_dirs_exist(d.path(), d.path(), &flow, &common);
+
+        assert!(
+            fs.iter()
+                .any(|f| f.severity == Severity::Warn && f.message.contains("does not exist")),
+            "expected a WARN that the root-resolved relative log dir is missing, got: {fs:?}"
+        );
+        assert!(
+            !fs.iter().any(|f| f.message.contains("cannot be verified")),
+            "relative paths must be checked against <root>, not waved through: {fs:?}"
+        );
+        assert!(
+            !fs.iter().any(|f| f.severity == Severity::Fail),
+            "doctor log-dir check must stay advisory (never FAIL), got: {fs:?}"
+        );
+    }
+
+    #[test]
+    fn log_dirs_pass_when_relative_parent_exists_under_root() {
+        // Relative log dir that DOES exist under <root> → PASS.
+        let d = tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("logs")).unwrap();
+        let common = common_with_logs(Some("logs/%x.%j.out"), None);
+        std::fs::write(d.path().join("flow.toml"), GOOD_FLOW).unwrap();
+        let (flow, _) = check_flow(d.path(), &common);
+        let flow = flow.expect("fixture flow should parse");
+
+        let fs = check_log_dirs_exist(d.path(), d.path(), &flow, &common);
+
+        assert!(
+            fs.iter().all(|f| f.severity == Severity::Pass),
+            "relative log dir existing under <root> must produce only PASS, got: {fs:?}"
+        );
+    }
+
+    #[test]
+    fn log_dirs_pass_when_parent_exists() {
+        let d = tempdir().unwrap();
+        // Point the log dir at the tempdir itself, which exists.
+        let ok = d.path().join("%x.%j.out").to_string_lossy().into_owned();
+        let common = common_with_logs(Some(&ok), None);
+        std::fs::write(d.path().join("flow.toml"), GOOD_FLOW).unwrap();
+        let (flow, _) = check_flow(d.path(), &common);
+        let flow = flow.expect("fixture flow should parse");
+
+        let fs = check_log_dirs_exist(d.path(), d.path(), &flow, &common);
+
+        assert!(
+            fs.iter().all(|f| f.severity == Severity::Pass),
+            "existing absolute log parent dir must produce only PASS, got: {fs:?}"
+        );
     }
 }

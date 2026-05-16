@@ -198,6 +198,34 @@ impl<'r> FlowRunner<'r> {
             }
         }
 
+        // --- fail-fast preflight ---
+        // sbatch does not create the --output/--error parent dir; a
+        // missing one makes SLURM mark the job FAILED with no useful
+        // reason. Validate every job's effective log dirs up front (real
+        // submit only) so we abort here with a clear error instead of
+        // partially submitting a flow that will fail opaquely. Skipped
+        // for dry_run (render-only never reaches SLURM). Resolved configs
+        // are cached and consumed by the submit loop below, so
+        // `effective_config` runs exactly once per job.
+        let mut effective: BTreeMap<JobId, _> = BTreeMap::new();
+        if !dry_run {
+            for jid in &order {
+                let config = fr.effective_config(jid)?;
+                if let Some((field, dir)) =
+                    crate::slurm::logpath::missing_log_dirs(self.resolver.root(), &config)
+                        .into_iter()
+                        .next()
+                {
+                    return Err(JobManagerError::LogDirMissing {
+                        job: jid.clone(),
+                        field,
+                        dir,
+                    });
+                }
+                effective.insert(jid.clone(), config);
+            }
+        }
+
         for jid in &order {
             // --- render batch.bash ---
             let params = fr.params_of(jid)?;
@@ -232,7 +260,11 @@ impl<'r> FlowRunner<'r> {
             }
 
             // --- build SbatchCmd ---
-            let config = fr.effective_config(jid)?;
+            // Reuse the config the preflight already resolved (real
+            // submit only; the dry_run path `continue`d above).
+            let config = effective
+                .remove(jid)
+                .expect("preflight resolved the effective config for every submitted job");
             let mut cmd = SbatchCmd::new(batch_path.clone());
             cmd.partition = Some(config.partition.clone());
             cmd.time_limit = config.time_limit;
@@ -451,6 +483,116 @@ mod tests {
         runner.submit(&fr, true).await.unwrap();
         let snap = resolver.flow_effective_toml(&fr.flow_uuid);
         assert!(snap.exists(), "snapshot not written at {}", snap.display());
+    }
+
+    /// One-job FlowRun whose single job carries `log_stdout`. `common` is
+    /// None so the effective config is exactly this job config.
+    fn fr_with_log_stdout(log_stdout: Option<std::path::PathBuf>) -> FlowRun {
+        let job_id = JobId("test_job".to_string());
+        let mut jobs: BTreeMap<JobId, Job> = BTreeMap::new();
+        jobs.insert(
+            job_id.clone(),
+            Job {
+                spec: JobSpec {
+                    program: Program("dummy".to_string()),
+                    body: "echo hello".to_string(),
+                    config: {
+                        let mut c = crate::persistence::synth_empty_common().slurm_default;
+                        c.partition = "long".to_string();
+                        c.log_stdout = log_stdout;
+                        c
+                    },
+                },
+                parents: vec![],
+            },
+        );
+        let flow = JobFlow {
+            uuid: uuid::Uuid::nil(),
+            created_at: chrono::Utc::now(),
+            tags: BTreeMap::new(),
+            jobs,
+        };
+        let mut plan_jobs: BTreeMap<JobId, BTreeMap<String, toml::Value>> = BTreeMap::new();
+        plan_jobs.insert(job_id, BTreeMap::new());
+        FlowRun {
+            flow_uuid: uuid::Uuid::new_v4(),
+            flow,
+            plan: crate::plan::ExperimentPlan { jobs: plan_jobs },
+            common: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_fails_fast_when_log_dir_missing() {
+        // The prod incident: log_stdout's parent dir does not exist.
+        // job-manager must refuse to submit (clear error) rather than let
+        // SLURM mark the job FAILED opaquely. Empty MockExecutor
+        // recordings mean: if the preflight is absent and we reach the
+        // executor, the error would be SubmitFailed, not LogDirMissing —
+        // so this test distinguishes "failed fast" from "failed late".
+        let dir = tempdir().unwrap();
+        let resolver = PathResolver::new(dir.path());
+        let missing = dir.path().join("no_such/logs/%j.out");
+        let fr = fr_with_log_stdout(Some(missing));
+
+        let runner = FlowRunner::new(
+            Box::new(MockExecutor::new(vec![])),
+            Box::new(InMemoryQuerier::new(HashMap::new())),
+            &resolver,
+        );
+
+        let err = runner
+            .submit(&fr, false)
+            .await
+            .expect_err("submit must fail fast on a missing log dir");
+        assert!(
+            matches!(err, JobManagerError::LogDirMissing { .. }),
+            "expected LogDirMissing (failed fast before executor), got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_dry_run_does_not_fail_fast_on_missing_log_dir() {
+        // render-only never reaches SLURM, so a missing log dir is not a
+        // problem here — dry_run must skip the preflight.
+        let dir = tempdir().unwrap();
+        let resolver = PathResolver::new(dir.path());
+        let fr = fr_with_log_stdout(Some(dir.path().join("no_such/logs/%j.out")));
+
+        let runner = FlowRunner::new(
+            Box::new(MockExecutor::new(vec![])),
+            Box::new(InMemoryQuerier::new(HashMap::new())),
+            &resolver,
+        );
+
+        runner
+            .submit(&fr, true)
+            .await
+            .expect("dry_run must not fail-fast on a missing log dir");
+    }
+
+    #[tokio::test]
+    async fn submit_succeeds_when_log_dir_exists() {
+        let dir = tempdir().unwrap();
+        let resolver = PathResolver::new(dir.path());
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let fr = fr_with_log_stdout(Some(dir.path().join("logs/%j.out")));
+
+        let runner = FlowRunner::new(
+            Box::new(MockExecutor::new(vec![777])),
+            Box::new(InMemoryQuerier::new(HashMap::new())),
+            &resolver,
+        );
+
+        let submitted = runner
+            .submit(&fr, false)
+            .await
+            .expect("submit should succeed when the log dir exists");
+        assert_eq!(
+            submitted.get(&JobId("test_job".to_string())),
+            Some(&777),
+            "expected the job to be submitted with the mocked jobid"
+        );
     }
 
     #[tokio::test]

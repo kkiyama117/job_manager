@@ -93,6 +93,7 @@ pub fn run_doctor(root: &Path, scope: &DoctorScope) -> Result<DoctorReport, JobM
             report.extend(checks::check_uuid_matches_dir(&dir, &flow));
             report.extend(checks::check_parents_resolve(&dir, &flow));
             report.extend(checks::check_plan_coverage(&dir, &flow));
+            report.extend(checks::check_log_dirs_exist(root, &dir, &flow, &common));
         }
     }
     Ok(report)
@@ -141,6 +142,51 @@ mod tests {
         let report = run_doctor(root, &DoctorScope::All).unwrap();
         assert!(!report.has_fail(), "report:\n{report}");
         assert!(report.count(Severity::Pass) >= 3);
+    }
+
+    #[test]
+    fn run_doctor_warns_when_common_log_dir_missing_but_does_not_fail() {
+        let d = tempdir().unwrap();
+        let root = d.path();
+        let fdir = root.join("01999999-0000-7000-8000-000000000000");
+        std::fs::create_dir_all(&fdir).unwrap();
+        // partition + a log_stdout whose parent dir does not exist; the
+        // job omits [config] so it inherits both from common.toml — the
+        // exact prod shape that produced a FAILED job with no reason.
+        let missing = root.join("no_such/logs/%x.%j.out");
+        std::fs::write(
+            root.join("common.toml"),
+            format!(
+                "[slurm_default]\npartition = \"long\"\n\
+                 log_stdout = {:?}\n\
+                 [directories]\nproject_root = \"/work\"\n",
+                missing.to_string_lossy(),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            fdir.join("flow.toml"),
+            "uuid = \"01999999-0000-7000-8000-000000000000\"\n\
+             created_at = \"2026-05-15T00:00:00Z\"\n\
+             [jobs.opt]\nprogram = \"echo\"\nbody = \"x\\n\"\n\
+             [jobs.opt.config]\n",
+        )
+        .unwrap();
+        std::fs::write(fdir.join("plan.toml"), "[jobs.opt]\n").unwrap();
+
+        let report = run_doctor(root, &DoctorScope::All).unwrap();
+
+        assert!(
+            !report.has_fail(),
+            "log-dir issue must stay advisory, not FAIL:\n{report}"
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.severity == Severity::Warn && f.message.contains("does not exist")),
+            "expected a WARN about the missing log parent dir:\n{report}"
+        );
     }
 
     #[test]

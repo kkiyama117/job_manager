@@ -44,6 +44,7 @@ impl From<JobManagerError> for PyErr {
             | JobManagerError::JobIdParseError { .. }
             | JobManagerError::PartitionMissing { .. }
             | JobManagerError::PartitionWrongType { .. }
+            | JobManagerError::LogDirMissing { .. }
             | JobManagerError::RootInferenceFailed { .. }
             | JobManagerError::FileTooLarge { .. }
             | JobManagerError::DependencyCycle { .. }
