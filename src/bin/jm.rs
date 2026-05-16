@@ -1,9 +1,9 @@
 //! `jm` — job-manager CLI.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "jm", about = "job-manager CLI")]
@@ -34,13 +34,13 @@ enum Cmd {
     Show { target: String },
     /// Query SLURM and update .status.toml.
     Tick { target: String },
-    /// Cross-flow search.
-    Search {
-        #[arg(long)]
-        program: Option<String>,
-    },
     /// Validate TOML files + structural invariants under --root.
     Doctor { target: Option<String> },
+    /// Cross-flow status listing (read-only; no SLURM).
+    Ls {
+        #[command(subcommand)]
+        view: LsView,
+    },
     /// Scaffold a new flow: mint a UUID v7, create <root>/<uuid>/, and
     /// write flow.toml + plan.toml boilerplate (a 2-job step1->step2 DAG).
     New {
@@ -79,9 +79,9 @@ async fn main() -> anyhow::Result<()> {
             let root = resolve_root(&cli)?;
             cmd_tick(&root, target).await
         }
-        Cmd::Search { ref program } => {
+        Cmd::Ls { ref view } => {
             let root = resolve_root(&cli)?;
-            cmd_search(&root, program.as_deref()).await
+            cmd_ls(&root, view).await
         }
         Cmd::Doctor { ref target } => {
             let root = resolve_root(&cli)?;
@@ -95,6 +95,100 @@ async fn main() -> anyhow::Result<()> {
             cmd_new(&root, tags, print_path).await
         }
     }
+}
+
+#[derive(Subcommand)]
+enum LsView {
+    /// One row per job across all flows.
+    Jobs {
+        #[command(flatten)]
+        filter: FilterArgs,
+        #[command(flatten)]
+        fmt: FmtArgs,
+    },
+    /// One row per flow (aggregated status).
+    Flows {
+        #[command(flatten)]
+        filter: FilterArgs,
+        #[command(flatten)]
+        fmt: FmtArgs,
+    },
+    /// Flow → job tree. No arg = all flows matching the filters;
+    /// FLOW_UUID = that one flow (filters then select forest membership
+    /// only — a flow's tree always shows its full job DAG).
+    Tree {
+        target: Option<String>,
+        #[command(flatten)]
+        filter: FilterArgs,
+    },
+}
+
+#[derive(Args, Debug)]
+struct FilterArgs {
+    /// Filter by program name (exact match).
+    #[arg(long)]
+    program: Option<String>,
+    /// Repeatable KEY=VALUE; all must match.
+    #[arg(long = "tag", value_name = "KEY=VALUE")]
+    tag: Vec<String>,
+    /// Comma-separated: pd,q,r,ok,f,sk or long names (case-insensitive).
+    #[arg(long)]
+    status: Option<String>,
+    /// flow uuid prefix (case-insensitive).
+    #[arg(long)]
+    flow: Option<String>,
+    /// Only flows created at/after this RFC3339 datetime.
+    #[arg(long)]
+    created_after: Option<String>,
+    /// Only flows created at/before this RFC3339 datetime.
+    #[arg(long)]
+    created_before: Option<String>,
+    /// Filter by SLURM job id (matches a job's recorded slurm_jobid).
+    #[arg(long)]
+    slurm_jobid: Option<u64>,
+    /// Filter by job id.
+    #[arg(long)]
+    job: Option<String>,
+    /// Maximum number of result rows.
+    #[arg(long)]
+    limit: Option<usize>,
+}
+
+#[derive(Args, Debug)]
+struct FmtArgs {
+    #[arg(long)]
+    json: bool,
+    #[arg(long)]
+    no_header: bool,
+}
+
+fn build_filter(a: &FilterArgs) -> anyhow::Result<job_manager::SearchFilter> {
+    use gaussian_job_shared::entities::workflow::{JobId, Program};
+
+    let mut tags = BTreeMap::new();
+    for raw in &a.tag {
+        let (k, v) = parse_tag(raw)?;
+        tags.insert(k, v);
+    }
+    let status = match &a.status {
+        Some(s) => job_manager::parse_status_set(s).map_err(|e| anyhow::anyhow!(e))?,
+        None => BTreeSet::new(),
+    };
+    let parse_dt = |s: &str| -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
+        Ok(chrono::DateTime::parse_from_rfc3339(s)
+            .map_err(|e| anyhow::anyhow!("invalid RFC3339 datetime {s:?}: {e}"))?
+            .with_timezone(&chrono::Utc))
+    };
+    Ok(job_manager::SearchFilter {
+        program: a.program.clone().map(Program::from),
+        tags,
+        status,
+        flow_uuid_prefix: a.flow.clone(),
+        created_after: a.created_after.as_deref().map(parse_dt).transpose()?,
+        created_before: a.created_before.as_deref().map(parse_dt).transpose()?,
+        slurm_jobid: a.slurm_jobid,
+        job_id: a.job.clone().map(JobId::from),
+    })
 }
 
 fn resolve_root(cli: &Cli) -> anyhow::Result<PathBuf> {
@@ -258,10 +352,8 @@ async fn cmd_doctor(root: &std::path::Path, target: Option<&str>) -> anyhow::Res
     Ok(())
 }
 
-async fn cmd_search(root: &std::path::Path, program: Option<&str>) -> anyhow::Result<()> {
-    use futures::StreamExt;
+async fn cmd_ls(root: &std::path::Path, view: &LsView) -> anyhow::Result<()> {
     use job_manager::persistence::{PathResolver, read_common};
-    use job_manager::walk::walk_flows;
     use std::sync::Arc;
 
     let resolver = PathResolver::new(root);
@@ -269,23 +361,49 @@ async fn cmd_search(root: &std::path::Path, program: Option<&str>) -> anyhow::Re
     let common = if common_path.exists() {
         read_common(&common_path)?
     } else {
-        tracing::info!(
-            common_path = %common_path.display(),
-            "common.toml not found under root; falling back to synth_empty_common for jm search"
-        );
         job_manager::persistence::synth_empty_common()
     };
+    let common = Arc::new(common);
 
-    let s = walk_flows(root, Arc::new(common));
-    let mut s = std::pin::pin!(s);
-    while let Some(item) = s.next().await {
-        let flow = item?;
-        if let Some(p) = program
-            && !flow.jobs.values().any(|j| j.spec.program.0 == p)
-        {
-            continue;
+    match view {
+        LsView::Jobs { filter, fmt } => {
+            let f = build_filter(filter)?;
+            let collected = job_manager::listing::collect(root, common, &f).await?;
+            let rows = job_manager::listing::job_rows(&collected, &f, filter.limit);
+            if fmt.json {
+                println!("{}", job_manager::listing::format_jobs_json(&rows)?);
+            } else {
+                print!(
+                    "{}",
+                    job_manager::listing::format_jobs_table(&rows, fmt.no_header)
+                );
+            }
         }
-        println!("{}\t{}", flow.uuid, flow.created_at);
+        LsView::Flows { filter, fmt } => {
+            let f = build_filter(filter)?;
+            let collected = job_manager::listing::collect(root, common, &f).await?;
+            let rows = job_manager::listing::flow_rows(&collected, &f, filter.limit);
+            if fmt.json {
+                println!("{}", job_manager::listing::format_flows_json(&rows)?);
+            } else {
+                print!(
+                    "{}",
+                    job_manager::listing::format_flows_table(&rows, fmt.no_header)
+                );
+            }
+        }
+        LsView::Tree { target, filter } => {
+            let f = build_filter(filter)?;
+            let collected = job_manager::listing::collect(root, common, &f).await?;
+            let selected: Vec<&job_manager::listing::CollectedFlow> = match target {
+                Some(t) => {
+                    let uuid = parse_target(root, t)?;
+                    collected.iter().filter(|c| c.flow.uuid == uuid).collect()
+                }
+                None => job_manager::listing::matched_flows(&collected, &f, filter.limit),
+            };
+            print!("{}", job_manager::listing::format_tree(&selected));
+        }
     }
     Ok(())
 }
@@ -590,6 +708,82 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_ls_jobs_with_filters() {
+        let cli = Cli::try_parse_from([
+            "jm",
+            "--root",
+            "/tmp/x",
+            "ls",
+            "jobs",
+            "--status",
+            "running,F",
+            "--program",
+            "g16",
+            "--no-header",
+        ])
+        .expect("parse ls jobs");
+        match cli.cmd {
+            Cmd::Ls {
+                view: LsView::Jobs { filter, fmt },
+            } => {
+                assert_eq!(filter.status.as_deref(), Some("running,F"));
+                assert_eq!(filter.program.as_deref(), Some("g16"));
+                assert!(fmt.no_header);
+                assert!(!fmt.json);
+            }
+            _ => panic!("expected ls jobs"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_ls_tree_optional_target() {
+        let cli =
+            Cli::try_parse_from(["jm", "--root", "/tmp/x", "ls", "tree"]).expect("parse ls tree");
+        match cli.cmd {
+            Cmd::Ls {
+                view: LsView::Tree { target, .. },
+            } => assert!(target.is_none()),
+            _ => panic!("expected ls tree"),
+        }
+    }
+
+    #[test]
+    fn build_filter_parses_status_tag_dates() {
+        let fa = FilterArgs {
+            program: Some("g16".into()),
+            tag: vec!["env=prod".into()],
+            status: Some("ok,running".into()),
+            flow: Some("0199".into()),
+            created_after: Some("2026-05-16T00:00:00Z".into()),
+            created_before: None,
+            slurm_jobid: Some(42),
+            job: Some("step1".into()),
+            limit: Some(10),
+        };
+        let f = build_filter(&fa).expect("build_filter ok");
+        assert_eq!(f.status.len(), 2);
+        assert_eq!(f.tags.get("env").map(String::as_str), Some("prod"));
+        assert!(f.created_after.is_some());
+        assert_eq!(f.slurm_jobid, Some(42));
+    }
+
+    #[test]
+    fn build_filter_rejects_bad_status() {
+        let fa = FilterArgs {
+            program: None,
+            tag: vec![],
+            status: Some("nope".into()),
+            flow: None,
+            created_after: None,
+            created_before: None,
+            slurm_jobid: None,
+            job: None,
+            limit: None,
+        };
+        assert!(build_filter(&fa).is_err());
+    }
+
+    #[test]
     fn atomic_write_str_creates_file_with_exact_contents() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.toml");
@@ -604,5 +798,17 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "tmp file not cleaned: {leftovers:?}");
+    }
+
+    #[test]
+    fn cli_parses_ls_flows_with_json() {
+        let cli = Cli::try_parse_from(["jm", "--root", "/tmp/x", "ls", "flows", "--json"])
+            .expect("parse ls flows");
+        match cli.cmd {
+            Cmd::Ls {
+                view: LsView::Flows { fmt, .. },
+            } => assert!(fmt.json),
+            _ => panic!("expected ls flows"),
+        }
     }
 }
