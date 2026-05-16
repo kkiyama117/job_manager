@@ -62,6 +62,10 @@ canonical pattern.
 
 ## File schemas
 
+> Full field-by-field TOML format: [toml-reference.md](toml-reference.md).
+> Exhaustive valid examples: [`examples/full/`](../examples/full/).
+> Validate a tree: `jm --root <root> doctor`.
+
 | File | Schema | `deny_unknown_fields` |
 |---|---|---|
 | `flow.toml` | D2 `JobFlow` (jobs + edges; `partition` per job may be omitted and inherited from `common.toml`) | upstream |

@@ -1,0 +1,21 @@
+# examples/full/<uuid>/plan.toml — ExperimentPlan.
+#
+# Schema: job_manager::plan::ExperimentPlan (deny_unknown_fields)
+#   jobs.<JobId> : BTreeMap<String, toml::Value>  (arbitrary TOML values)
+#
+# Demonstrates every TOML value kind so you can see the flexibility.
+# Every JobId in flow.toml has an entry here (jm doctor WARNs otherwise).
+
+[jobs.opt]
+note      = "string value"
+nproc     = 8                        # integer
+threshold = 1.5e-4                   # float
+verbose   = true                     # boolean
+route     = ["opt", "freq=noraman"]  # array
+[jobs.opt.solvent]                   # nested table value
+model = "pcm"
+name  = "water"
+
+[jobs.freq]
+note  = "second step"
+nproc = 8

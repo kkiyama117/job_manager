@@ -1,0 +1,28 @@
+# examples/full/common.toml — EXHAUSTIVE, VALID CommonConfig.
+#
+# Schema: gaussian_job_shared::config::CommonConfig (deny_unknown_fields)
+#   [slurm_default] -> slurm_async_runner SlurmJobConfig (every field below)
+#   [directories]   -> DirectoryConfig { project_root }
+#
+# Every user-settable [slurm_default] field is shown. `partition` is the
+# only required field; the rest are optional and merged into each job's
+# config (job value wins; common fills the gaps).
+
+[slurm_default]
+partition     = "long"
+time_limit    = "00:10:00"            # HH:MM:SS (also "MM", "MM:SS"=min:sec, "D-H", "D-H:M", "D-H:M:S")
+job_name      = "jm-full"
+comment       = "job-manager full example"
+log_stdout    = "/work/jm-full/%x.%j.out"   # %x=job_name %j=slurm jobid
+log_stderr    = "/work/jm-full/%x.%j.err"
+mail_user     = "user@example.com"
+mail_types    = ["BEGIN", "END", "FAIL"]   # array of: BEGIN, END, FAIL, REQUEUE, ALL
+resource_spec = "p=4:t=8:c=8:m=8G"    # CPU form "p=N:t=N:c=N:m=NG" OR GPU form "g=N" — one string, mutually exclusive
+array_spec    = "0-3%2"               # index range, %N caps concurrency
+# dependency: a raw SLURM dependency string. job-manager normally manages
+# inter-job dependencies via flow.toml `parents[]`, so leave this unset
+# unless you need a manual SLURM dependency. Uncomment to use:
+# dependency  = "afterok:200"
+
+[directories]
+project_root = "/work/jm-full"        # absolute; tilde / $HOME are NOT expanded
