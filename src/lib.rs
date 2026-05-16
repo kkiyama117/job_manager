@@ -24,7 +24,11 @@ pub use error::{JobManagerError, SchemaParseError};
 pub use flow::FlowRun;
 pub use job::{JobRun, Lifecycle};
 pub use jobid::{JobIdParts, build_job_id, parse_job_id, validate_job_id, validate_step_id};
-pub use listing::{DisplayLifecycle, parse_status_set};
+pub use listing::{
+    CollectedFlow, DisplayLifecycle, FlowRow, FlowStatus, JobRow, aggregate_flow_status,
+    format_flows_json, format_flows_table, format_jobs_json, format_jobs_table, format_tree,
+    parse_status_set,
+};
 pub use persistence::{
     PathResolver, merge_with_defaults, read_common, read_flow, read_flow_effective, read_job_run,
     read_plan, synth_empty_common, write_common, write_flow, write_flow_effective, write_job_run,
