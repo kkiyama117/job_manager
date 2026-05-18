@@ -7,5 +7,5 @@ pub mod job;
 
 pub use job::{
     FlowRecipe, GeneratedFile, JobArtifacts, JobCtx, JobTemplate, PreambleOpts, RecipeError,
-    RecipeParam, RecipeParamType,
+    RecipeParam, RecipeParamType, base_preamble,
 };

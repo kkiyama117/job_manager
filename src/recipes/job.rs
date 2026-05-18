@@ -123,9 +123,80 @@ pub struct PreambleOpts<'a> {
     pub pixi_manifest: &'a str,
 }
 
+/// 上流 `_base.bash.j2` を embed し minijinja で描画した共有プリアンブル。
+/// `#SBATCH` は含まない(SbatchCmd 領域)。公開シグネチャは不変契約。
+pub fn base_preamble(o: &PreambleOpts<'_>) -> String {
+    const TEMPLATE: &str = include_str!("assets/_base.bash.j2");
+    let mut env = minijinja::Environment::new();
+    // bash は空白/改行に敏感 → lstrip/trim を無効化し template の
+    // whitespace-control 記法(`{%- -%}`)だけで制御する。
+    env.set_lstrip_blocks(false);
+    env.set_trim_blocks(false);
+    env.add_template("_base", TEMPLATE)
+        .expect("embedded _base.bash.j2 is a static, valid template");
+    let tmpl = env.get_template("_base").expect("template was just added");
+    tmpl.render(minijinja::context! {
+        conda_env => o.conda_env,
+        module_block => o.module_block,
+        body_block => o.body_block,
+        pixi_manifest => o.pixi_manifest,
+    })
+    .expect("static template + string context cannot fail to render")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base_preamble_matches_expected_fixture_for_g16_opt() {
+        let out = base_preamble(&PreambleOpts {
+            conda_env: "analysis",
+            module_block: "module restore gaussian_A -f",
+            body_block: "python scripts/run.py",
+            pixi_manifest: "",
+        });
+        let expected = include_str!("assets/_base.bash.expected");
+        assert_eq!(out, expected, "base_preamble drifted from fixture");
+    }
+
+    #[test]
+    fn base_preamble_omits_pixi_hook_when_manifest_empty() {
+        let out = base_preamble(&PreambleOpts {
+            conda_env: "analysis",
+            module_block: "module restore default -f",
+            body_block: "python scripts/parse.py",
+            pixi_manifest: "",
+        });
+        assert!(!out.contains("pixi shell-hook"), "got:\n{out}");
+        assert!(out.contains("module restore default -f"));
+        assert!(out.contains("conda activate analysis"));
+    }
+
+    #[test]
+    fn base_preamble_includes_pixi_hook_when_manifest_set() {
+        let out = base_preamble(&PreambleOpts {
+            conda_env: "analysis",
+            module_block: "module restore gaussian_A -f",
+            body_block: "python scripts/run.py",
+            pixi_manifest: "/work/pixi.toml",
+        });
+        assert!(out.contains("pixi shell-hook --manifest-path /work/pixi.toml"));
+    }
+
+    #[test]
+    fn base_preamble_has_no_sbatch_and_resets_conda() {
+        let out = base_preamble(&PreambleOpts {
+            conda_env: "analysis",
+            module_block: "module restore gaussian_A -f",
+            body_block: "python scripts/run.py",
+            pixi_manifest: "",
+        });
+        assert!(!out.contains("#SBATCH"), "preamble must not carry #SBATCH");
+        assert!(out.contains("unset -f conda"));
+        assert!(out.contains("CONDA_"));
+        assert!(out.trim_end().ends_with("exit 0"));
+    }
 
     #[test]
     fn recipe_param_type_is_copy_and_eq() {

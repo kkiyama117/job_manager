@@ -1,0 +1,22 @@
+#!/bin/bash
+set -euo pipefail
+{% raw %}
+# --- reset inherited conda activation state (pixi-conda-stack-reset) ---
+# A SLURM job inherits the submitter's shell env; a half-activated conda
+# stack there breaks `conda activate` here. Fully unwind it first.
+unset -f conda 2>/dev/null || true
+for _v in $(compgen -v | grep -E '^CONDA_' || true); do
+  unset "$_v" 2>/dev/null || true
+done
+unset _v 2>/dev/null || true
+{% endraw %}
+source "$(conda info --base)/etc/profile.d/conda.sh"
+. /usr/share/Modules/init/bash
+{{ module_block }}
+conda activate {{ conda_env }}
+{%- if pixi_manifest %}
+eval "$(pixi shell-hook --manifest-path {{ pixi_manifest }})"
+{%- endif %}
+{{ body_block }}
+echo "JOB DONE"
+exit 0
