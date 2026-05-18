@@ -10,7 +10,7 @@ pub mod jobs;
 pub mod xyz;
 
 pub use flow::{Assembled, assemble};
-pub use flows::G16OptParse;
+pub use flows::{G16OptParse, blank};
 pub use job::{
     FlowRecipe, GeneratedFile, JobArtifacts, JobCtx, JobTemplate, PreambleOpts, RecipeError,
     RecipeParam, RecipeParamType, base_preamble,
