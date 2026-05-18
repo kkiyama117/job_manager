@@ -136,7 +136,8 @@ pub struct GeneratedFile {
 pub struct JobArtifacts {
     /// flow.toml `[jobs.<id>] program`(論理分類値。`jm ls --program` 用)。
     pub program: String,
-    /// flow.toml `[jobs.<id>] body`。R3: 絶対 cd + `bash scripts/<id>.bash`。
+    /// flow.toml `[jobs.<id>] body`。R3': `bash scripts/<id>.bash` のみ(cd 無し)。
+    /// job dir は run.py/parse.py 冒頭の絶対 `JOB_DIR` 定数で解決(cwd 非依存)。
     pub body: String,
     /// flow.toml `[jobs.<id>.config] time_limit`。
     pub time_limit: Option<String>,
@@ -156,7 +157,8 @@ pub struct JobCtx<'a> {
     pub inputs: &'a BTreeMap<String, String>,
     pub uuid: &'a uuid::Uuid,
     pub created_at: &'a str,
-    /// 絶対 `<root>/<uuid>`。R3 で body 先頭に焼く cd 先の親。
+    /// 絶対 `<root>/<uuid>`。R3' で `flow_dir_abs.join(job_id)` を run.py/parse.py の
+    /// `{{JOB_DIR}}` sentinel へ swap-in する絶対 job dir の親。
     pub flow_dir_abs: &'a Path,
 }
 
@@ -645,7 +647,9 @@ sentinel 方式(`{{NAME}}` を `str::replace`。minijinja は使わない — ru
 {{EXTRA_INPUT}}
 ```
 
-- [ ] **Step 2: `src/recipes/assets/g16_opt/run.py.tmpl`(`run_g16` 写経、純 stdlib・sentinel 無し)**
+- [ ] **Step 2: `src/recipes/assets/g16_opt/run.py.tmpl`(`run_g16` 写経、純 stdlib・sentinel は `{{JOB_DIR}}` の 1 個のみ)**
+
+R3':`JOB_DIR = "{{JOB_DIR}}"` を冒頭に置き、Task 6 instantiate が `flow_dir_abs.join(job_id)` の Python エスケープ済み絶対パスへ `str::replace("{{JOB_DIR}}", ...)` する。`os.getcwd()` は使わない(SLURM cwd 非決定性に非依存=参照 `run-g16` と同性質)。`{{JOB_DIR}}` は通常文字列リテラル(f-string ではない)内なので Python の `{...}` とは衝突しない。
 
 ```python
 #!/usr/bin/env python3
@@ -661,6 +665,12 @@ import shutil
 import subprocess
 import sys
 
+# R3': scaffold (`jm new`) swaps {{JOB_DIR}} for the absolute job dir at
+# generate time. This script never reads os.getcwd(), so it is immune to
+# SLURM's nondeterministic submit cwd / spool-copy (same property as the
+# reference `run-g16`, which resolves everything from --config/--uuid).
+JOB_DIR = "{{JOB_DIR}}"
+
 TASK = "main"
 
 
@@ -669,7 +679,7 @@ def log(msg):
 
 
 def main():
-    job_dir = os.getcwd()  # R3: flow.toml body already `cd`'d here.
+    job_dir = JOB_DIR  # R3': scaffold-baked absolute path; cwd-independent.
     g16 = os.environ.get("JM_PARAM_G16_CMD", "g16")
     launcher = os.environ.get("JM_PARAM_LAUNCHER", "")
     flow_uuid = os.environ.get("JM_FLOW_UUID", "noflow")
@@ -747,7 +757,7 @@ if __name__ == "__main__":
 - [ ] **Step 3: Python 構文チェック**
 
 Run: `python3 -c "import ast; ast.parse(open('src/recipes/assets/g16_opt/run.py.tmpl').read())"`
-Expected: 例外なし(終了コード0)。run.py に `{{...}}` は無いので素の Python として valid。
+Expected: 例外なし(終了コード0)。唯一の sentinel `{{JOB_DIR}}` は通常文字列リテラル `JOB_DIR = "{{JOB_DIR}}"` の内側なので、未置換のテンプレでも素の Python として valid(置換後も valid)。
 
 - [ ] **Step 4: Commit**
 
@@ -820,9 +830,14 @@ fn pv<'a>(ctx: &'a JobCtx<'_>, k: &str) -> &'a str {
     ctx.params.get(k).map(|s| s.as_str()).unwrap_or_default()
 }
 
-/// bash 安全な絶対パス引用(R3 cd 用)。
-fn quote_path(p: &Path) -> String {
-    format!("'{}'", p.to_string_lossy().replace('\'', r"'\''"))
+/// R3': `JOB_DIR = "{{JOB_DIR}}"` の二重引用符内へ差し込む Python 文字列リテラル
+/// 内容のエスケープ(`\` と `"` のみ。POSIX パスに改行はまず無いが念のため `\n` も)。
+/// 周囲の引用符はテンプレ側 (`"{{JOB_DIR}}"`) が持つ。
+fn py_escape(p: &Path) -> String {
+    p.to_string_lossy()
+        .replace('\\', r"\\")
+        .replace('"', "\\\"")
+        .replace('\n', r"\n")
 }
 
 /// param 値を宣言型に応じた `toml::Value` へ(検証は assemble 済み前提。
@@ -883,7 +898,9 @@ impl JobTemplate for G16Opt {
             .replace("{{GEOMETRY_BLOCK}}", &geometry_block)
             .replace("{{EXTRA_INPUT}}", pv(ctx, "extra_input"));
 
-        let run_py = include_str!("../assets/g16_opt/run.py.tmpl").to_string();
+        let abs_job_dir = ctx.flow_dir_abs.join(job_id);
+        let run_py = include_str!("../assets/g16_opt/run.py.tmpl")
+            .replace("{{JOB_DIR}}", &py_escape(&abs_job_dir)); // R3': cwd-independent
 
         let module_block = format!("module restore {} -f", pv(ctx, "module_profile"));
         let bash = base_preamble(&PreambleOpts {
@@ -908,11 +925,8 @@ impl JobTemplate for G16Opt {
             plan_params.insert(rp.name.to_string(), typed_toml(rp.ty, pv(ctx, rp.name)));
         }
 
-        let abs_job_dir = ctx.flow_dir_abs.join(job_id);
-        let body = format!(
-            "cd {} || exit 1\nbash scripts/{job_id}.bash\n",
-            quote_path(&abs_job_dir)
-        );
+        // R3': body は薄起動子のみ。cd 無し(job dir は run.py の JOB_DIR 絶対定数)。
+        let body = format!("bash scripts/{job_id}.bash\n");
 
         Ok(JobArtifacts {
             program: "g16".to_string(),
@@ -952,7 +966,7 @@ mod tests {
     }
 
     #[test]
-    fn instantiate_emits_r3_body_and_sidecars() {
+    fn instantiate_emits_r3prime_body_and_sidecars() {
         let params = default_params();
         let inputs = BTreeMap::new();
         let uuid = uuid::Uuid::now_v7();
@@ -963,10 +977,9 @@ mod tests {
 
         assert_eq!(a.program, "g16");
         assert_eq!(a.time_limit.as_deref(), Some("48:00:00"));
-        assert!(a
-            .body
-            .starts_with("cd '/work/root/01999999-0000-7000-8000-000000000000/opt' || exit 1\n"));
-        assert!(a.body.contains("bash scripts/opt.bash"));
+        // R3': body has NO cd — just the thin launcher.
+        assert_eq!(a.body, "bash scripts/opt.bash\n");
+        assert!(!a.body.contains("cd "), "R3': body must not cd");
 
         let bash = a
             .sidecars
@@ -985,6 +998,13 @@ mod tests {
             .find(|f| f.relpath.ends_with("scripts/run.py"))
             .unwrap();
         assert_eq!(runpy.unix_mode, Some(0o755));
+        // R3': absolute JOB_DIR baked in, no {{JOB_DIR}} sentinel left,
+        // os.getcwd() never used (cwd-independent like the reference run-g16).
+        assert!(runpy.contents.contains(
+            "JOB_DIR = \"/work/root/01999999-0000-7000-8000-000000000000/opt\""
+        ));
+        assert!(!runpy.contents.contains("{{JOB_DIR}}"), "sentinel must be swapped");
+        assert!(!runpy.contents.contains("os.getcwd()"), "R3': cwd-independent");
         assert!(runpy.contents.contains("subprocess.run(argv, cwd=scratch)"));
         assert!(runpy.contents.contains("finally:"));
         assert!(runpy.contents.contains("failed to launch"));
@@ -1081,7 +1101,7 @@ Run: `cargo clippy --all-targets --all-features -- -D warnings` → PASS
 
 ```bash
 git add src/recipes/jobs/ src/recipes/mod.rs Cargo.toml
-git commit -m "feat(recipes): g16_opt JobTemplate (R3 body, base_preamble, run.py, gjf)"
+git commit -m "feat(recipes): g16_opt JobTemplate (R3' cwd-independent body, base_preamble, run.py, gjf)"
 ```
 
 ---
@@ -1093,7 +1113,7 @@ git commit -m "feat(recipes): g16_opt JobTemplate (R3 body, base_preamble, run.p
 
 - [ ] **Step 1: `src/recipes/assets/parse_g16_out/parse.py.tmpl`(`parse_results` 写経)**
 
-`{{INPUT_REL}}` のみ sentinel(wiring が `../opt/output/main.out` に解決)。
+sentinel は 2 個:`{{JOB_DIR}}`(R3':scaffold が絶対 job dir を swap-in。cwd 非依存)と `{{INPUT_REL}}`(wiring が `../opt/output/main.out` に解決)。入力・出力とも `JOB_DIR` 基準で絶対化し `os.getcwd()` を使わない。
 
 ```python
 #!/usr/bin/env python3
@@ -1111,6 +1131,10 @@ import sys
 import tempfile
 
 SCHEMA = "jm-recipe/1"
+# R3': scaffold swaps these at generate time. parse.py never reads
+# os.getcwd(), so SLURM's nondeterministic submit cwd cannot break it
+# (same cwd-independence as the reference run-g16 / parse-results).
+JOB_DIR = "{{JOB_DIR}}"
 INPUT_REL = "{{INPUT_REL}}"
 
 
@@ -1143,7 +1167,9 @@ def main():
     except Exception:
         fail(2, "cclib not importable")
 
-    src = INPUT_REL
+    # R3': resolve the wiring-relative input against the baked absolute
+    # JOB_DIR (e.g. <...>/parse + ../opt/output/main.out -> <...>/opt/...).
+    src = os.path.normpath(os.path.join(JOB_DIR, INPUT_REL))
     if not os.path.isfile(src):
         fail(1, f"gaussian out not found: {src}")
 
@@ -1175,7 +1201,7 @@ def main():
         "n_atoms": natom,
         "source": os.path.abspath(src),
     }
-    out_path = os.path.join("output", "result.json")
+    out_path = os.path.join(JOB_DIR, "output", "result.json")
     try:
         atomic_write_json(out_path, result)
     except OSError as e:
@@ -1198,7 +1224,7 @@ if __name__ == "__main__":
 
 Run:
 ```bash
-python3 -c "import ast; ast.parse(open('src/recipes/assets/parse_g16_out/parse.py.tmpl').read().replace('{{INPUT_REL}}','../opt/output/main.out'))"
+python3 -c "import ast; ast.parse(open('src/recipes/assets/parse_g16_out/parse.py.tmpl').read().replace('{{JOB_DIR}}','/tmp/u/parse').replace('{{INPUT_REL}}','../opt/output/main.out'))"
 ```
 Expected: 例外なし(終了コード0)。
 
@@ -1244,8 +1270,13 @@ fn pv<'a>(ctx: &'a JobCtx<'_>, k: &str) -> &'a str {
     ctx.params.get(k).map(|s| s.as_str()).unwrap_or_default()
 }
 
-fn quote_path(p: &Path) -> String {
-    format!("'{}'", p.to_string_lossy().replace('\'', r"'\''"))
+/// R3': `JOB_DIR = "{{JOB_DIR}}"` の二重引用符内へ差し込む Python 文字列
+/// リテラル内容のエスケープ(周囲の引用符はテンプレ側が持つ)。
+fn py_escape(p: &Path) -> String {
+    p.to_string_lossy()
+        .replace('\\', r"\\")
+        .replace('"', "\\\"")
+        .replace('\n', r"\n")
 }
 
 impl JobTemplate for ParseG16Out {
@@ -1270,7 +1301,9 @@ impl JobTemplate for ParseG16Out {
             .cloned()
             .unwrap_or_else(|| "../opt/output/main.out".to_string());
 
+        let abs_job_dir = ctx.flow_dir_abs.join(job_id);
         let parse_py = include_str!("../assets/parse_g16_out/parse.py.tmpl")
+            .replace("{{JOB_DIR}}", &py_escape(&abs_job_dir)) // R3': cwd-independent
             .replace("{{INPUT_REL}}", &input_rel);
 
         let bash = base_preamble(&PreambleOpts {
@@ -1294,11 +1327,8 @@ impl JobTemplate for ParseG16Out {
             );
         }
 
-        let abs_job_dir = ctx.flow_dir_abs.join(job_id);
-        let body = format!(
-            "cd {} || exit 1\nbash scripts/{job_id}.bash\n",
-            quote_path(&abs_job_dir)
-        );
+        // R3': body は薄起動子のみ。cd 無し(入出力は parse.py の JOB_DIR 絶対定数)。
+        let body = format!("bash scripts/{job_id}.bash\n");
 
         Ok(JobArtifacts {
             program: "python".to_string(),
@@ -1342,8 +1372,9 @@ mod tests {
 
         assert_eq!(a.program, "python");
         assert_eq!(a.time_limit.as_deref(), Some("01:00:00"));
-        assert!(a.body.starts_with("cd '/r/u/parse' || exit 1\n"));
-        assert!(a.body.contains("bash scripts/parse.bash"));
+        // R3': body has NO cd.
+        assert_eq!(a.body, "bash scripts/parse.bash\n");
+        assert!(!a.body.contains("cd "), "R3': body must not cd");
 
         let bash = a
             .sidecars
@@ -1359,6 +1390,10 @@ mod tests {
             .find(|f| f.relpath.ends_with("scripts/parse.py"))
             .unwrap();
         assert_eq!(py.unix_mode, Some(0o755));
+        // R3': absolute JOB_DIR baked, sentinels swapped, cwd-independent.
+        assert!(py.contents.contains("JOB_DIR = \"/r/u/parse\""));
+        assert!(!py.contents.contains("{{JOB_DIR}}"));
+        assert!(!py.contents.contains("os.getcwd()"), "R3': cwd-independent");
         assert!(py.contents.contains("../opt/output/main.out"));
         assert!(!py.contents.contains("{{INPUT_REL}}"));
         assert!(py.contents.contains("cclib"));
@@ -1737,11 +1772,25 @@ mod tests {
     }
 
     #[test]
-    fn opt_body_cd_is_absolute_flow_dir_join_jobid() {
+    fn r3prime_no_cd_in_body_and_run_py_has_absolute_job_dir() {
         let a = assemble_default();
-        assert!(a
-            .flow_toml
-            .contains("cd '/work/root/01999999-0000-7000-8000-0000000000ab/opt' || exit 1"));
+        // R3': flow.toml body must NOT contain a cd anchor.
+        assert!(
+            !a.flow_toml.contains("cd "),
+            "R3': flow.toml body must not cd; got:\n{}",
+            a.flow_toml
+        );
+        assert!(a.flow_toml.contains("bash scripts/opt.bash"));
+        // The absolute job dir is baked into opt/scripts/run.py instead.
+        let runpy = a
+            .sidecars
+            .iter()
+            .find(|f| f.relpath.ends_with("opt/scripts/run.py"))
+            .unwrap();
+        assert!(runpy.contents.contains(
+            "JOB_DIR = \"/work/root/01999999-0000-7000-8000-0000000000ab/opt\""
+        ));
+        assert!(!runpy.contents.contains("os.getcwd()"), "R3': cwd-independent");
     }
 
     #[test]
@@ -1970,7 +2019,7 @@ git commit -m "feat(recipes): registry, --param parser, --list/--describe"
 
 ```rust
 //! `blank` FlowRecipe — legacy 2-job echo DAG。**既存 `jm new` 出力と
-//! バイト同値**(非分解・サイドカー/プリアンブル/R3 無し)。`jm new` ≡
+//! バイト同値**(非分解・サイドカー/プリアンブル/R3' 焼込定数 無し)。`jm new` ≡
 //! `jm new blank`。
 
 use std::collections::BTreeMap;
@@ -2212,6 +2261,14 @@ async fn cmd_new(
         anyhow::bail!("flow dir already exists: {}", flow_dir.display());
     }
     tokio::fs::create_dir_all(&flow_dir).await?;
+    // R3' invariant: the JOB_DIR baked into run.py/parse.py MUST be absolute,
+    // otherwise it would be re-resolved against SLURM's nondeterministic cwd
+    // at runtime — exactly the failure R3' eliminates. `--root` may be
+    // relative, so absolutize here (no symlink resolution: keeps login↔compute
+    // mounts stable per spec §5.1). std::path::absolute is stable on the
+    // pinned nightly/edition-2024 toolchain.
+    let flow_dir_abs =
+        std::path::absolute(&flow_dir).unwrap_or_else(|_| flow_dir.clone());
     let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     let rollback = || {
@@ -2254,7 +2311,7 @@ async fn cmd_new(
             &tag_map,
             &uuid,
             &created_at,
-            &flow_dir,
+            &flow_dir_abs, // R3': absolute -> baked JOB_DIR is cwd-independent
         ) {
             Ok(a) => a,
             Err(e) => {
@@ -2378,7 +2435,11 @@ def _materialize(tmp: Path) -> Path:
     )
     scripts = job / "scripts"
     scripts.mkdir()
-    (scripts / "run.py").write_text(RUN_TMPL.read_text())  # no {{ }} sentinels
+    # R3': scaffold bakes the absolute job dir; the smoke harness does the
+    # same {{JOB_DIR}} swap-in here so run.py is cwd-independent under test.
+    (scripts / "run.py").write_text(
+        RUN_TMPL.read_text().replace("{{JOB_DIR}}", str(job))
+    )
     return job
 
 
@@ -2480,7 +2541,13 @@ FIX = Path(__file__).resolve().parent / "_recipe_fixtures" / "g16_ok.out"
 def _materialize(tmp: Path, input_rel: str) -> Path:
     job = tmp / "parse"
     (job / "scripts").mkdir(parents=True)
-    body = PARSE_TMPL.read_text().replace("{{INPUT_REL}}", input_rel)
+    # R3': bake absolute JOB_DIR (mirrors scaffold). An absolute input_rel
+    # (e.g. the fixture) wins over JOB_DIR via os.path.join semantics.
+    body = (
+        PARSE_TMPL.read_text()
+        .replace("{{JOB_DIR}}", str(job))
+        .replace("{{INPUT_REL}}", input_rel)
+    )
     (job / "scripts" / "parse.py").write_text(body)
     return job
 
@@ -2636,7 +2703,9 @@ fn scaffold_g16_opt_parse_writes_all_files() {
 
     let flow = fs::read_to_string(dir.join("flow.toml")).unwrap();
     assert!(flow.contains("[jobs.opt]") && flow.contains("[jobs.parse]"));
-    assert!(flow.contains(&format!("cd '{}/opt' || exit 1", dir.display())));
+    // R3': flow.toml body has NO cd; absolute job dir is baked into run.py.
+    assert!(!flow.contains("cd "), "R3': flow.toml must not cd; got:\n{flow}");
+    assert!(flow.contains("bash scripts/opt.bash"));
 
     let gjf = fs::read_to_string(dir.join("opt/input/main.gjf")).unwrap();
     assert!(gjf.contains("1 1"));
@@ -2651,12 +2720,66 @@ fn scaffold_g16_opt_parse_writes_all_files() {
     assert!(dir.join("opt/scripts/run.py").exists());
     assert!(dir.join("parse/scripts/parse.py").exists());
 
+    // R3': the absolute job dir is baked into run.py/parse.py, sentinel
+    // swapped, and os.getcwd() never used (cwd-independent like run-g16).
+    let runpy = fs::read_to_string(dir.join("opt/scripts/run.py")).unwrap();
+    assert!(runpy.contains(&format!(
+        "JOB_DIR = \"{}/opt\"",
+        dir.display()
+    )));
+    assert!(!runpy.contains("{{JOB_DIR}}"));
+    assert!(!runpy.contains("os.getcwd()"));
+    let parsepy = fs::read_to_string(dir.join("parse/scripts/parse.py")).unwrap();
+    assert!(parsepy.contains(&format!(
+        "JOB_DIR = \"{}/parse\"",
+        dir.display()
+    )));
+    assert!(!parsepy.contains("{{JOB_DIR}}"));
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let m = fs::metadata(dir.join("opt/scripts/run.py")).unwrap();
         assert_eq!(m.permissions().mode() & 0o777, 0o755);
     }
+}
+
+#[test]
+fn r3prime_job_dir_is_absolute_even_with_relative_root() {
+    // R3' invariant regression: a relative `--root` must still bake an
+    // ABSOLUTE JOB_DIR (otherwise it re-resolves against SLURM's cwd).
+    let root = tempfile::tempdir().unwrap();
+    let mut c = jm();
+    c.current_dir(root.path()) // cwd = tempdir; pass `--root .` (relative)
+        .arg(".")
+        .arg("new")
+        .arg("g16-opt-parse")
+        .arg("--print-path");
+    let out = c.assert().success();
+    let printed = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let dir = PathBuf::from(printed.trim());
+
+    let runpy_path = if dir.is_absolute() {
+        dir.join("opt/scripts/run.py")
+    } else {
+        root.path().join(&dir).join("opt/scripts/run.py")
+    };
+    let runpy = fs::read_to_string(&runpy_path).unwrap();
+    // The JOB_DIR literal must start with the absolute tempdir prefix and
+    // must not be the relative "./..." form.
+    let job_dir_line = runpy
+        .lines()
+        .find(|l| l.starts_with("JOB_DIR = "))
+        .expect("run.py must define JOB_DIR");
+    let baked = job_dir_line
+        .trim_start_matches("JOB_DIR = \"")
+        .trim_end_matches('"');
+    assert!(
+        Path::new(baked).is_absolute(),
+        "R3': baked JOB_DIR must be absolute, got {baked:?}"
+    );
+    assert!(baked.ends_with("/opt"), "got {baked:?}");
+    assert!(!baked.starts_with("./") && !baked.starts_with("."), "got {baked:?}");
 }
 
 #[test]
@@ -2785,7 +2908,7 @@ Expected: 全 PASS。落ちたら該当タスクに戻り修正、緑になる�
 
 - [ ] **Step 5: spec ↔ 実装 最終突合**
 
-`docs/superpowers/specs/2026-05-18-jm-g16-opt-parse-recipe-design.md` §2/§7/§9/§10 を読み返し、`jm new`/`blank`/`g16-opt-parse`/`--param`/`--list`/`--describe`/`--print-path`/`--tag`/`input_coordinate`/R3/`JM_PARAM_*`/`%rwf` 無し/`# REPLACE_ME`/`result.json` スキーマ/`blank` バイト同値 が全てテストで担保されていることを確認(欠落あればタスク追加)。
+`docs/superpowers/specs/2026-05-18-jm-g16-opt-parse-recipe-design.md` §2/§5/§7/§9/§10 を読み返し、`jm new`/`blank`/`g16-opt-parse`/`--param`/`--list`/`--describe`/`--print-path`/`--tag`/`input_coordinate`/**R3'(body cd 無し・run.py/parse.py に絶対 `JOB_DIR`・cwd 非依存)**/`JM_PARAM_*`/`%rwf` 無し/`# REPLACE_ME`/`result.json` スキーマ/`blank` バイト同値 が全てテストで担保されていることを確認(欠落あればタスク追加)。
 
 - [ ] **Step 6: Commit + PR スタック**
 
@@ -2810,7 +2933,7 @@ gh pr create --base docs/jm-g16-opt-parse-altdesign \
 - §2 Goal 4(run.py/parse.py 写経 + `# REPLACE_ME`)→ Task 5/7/14
 - §2 Goal 5(v1 内完結 / `JM_PARAM_*` / 上流変更ゼロ)→ Task 6/8/13(render 改変なし)/15
 - §2 Goal 6(rollback)→ Task 13 + Task 15 `missing_input...rolls_back`
-- §2 Goal 7(R3 / シグネチャ不変)→ Task 6/8/10 + Task 15 cd アサート
+- §2 Goal 7(**R3'**:body cd 無し・run.py/parse.py に絶対 `JOB_DIR`・cwd 非依存 / シグネチャ不変)→ Task 5/6/7/8/10 + Task 14/15(JOB_DIR 焼込・`!cd`・`!os.getcwd()` アサート)
 - §4.1 base_preamble/minijinja/`{% raw %}`→ Task 3
 - §5.2 scratch 順序 prepare→g16(cwd=scratch)→finally copy→ Task 14
 - §7 g16_opt/parse_g16_out/flow→ Task 6/8/10
@@ -2823,7 +2946,7 @@ gh pr create --base docs/jm-g16-opt-parse-altdesign \
 
 **2. Placeholder scan:** 「Placeholder — implemented in Task N」(Task 6 Step1b / Task 10 Step2 blank / Task 12)は段階導入で各々後続タスクで実体化。`{{...}}`/`REPLACE_ME`/`# TODO derived/main.mol2` は生成物の意図的 sentinel。`JobFlow` 実型パス未確定点は **Task 9 を専用調査タスクとして分離し、依存する Task 10/12 のテストに「Task 9 確定値に置換」と明記**(プラン内の未解決を残さない)。
 
-**3. Type consistency:** `JobCtx`/`JobArtifacts`/`GeneratedFile`/`RecipeError`/`FlowRecipe`/`JobTemplate`/`PreambleOpts`(Task 2 定義)を Task 3/6/8/10/13 で同一シグネチャ使用。`assemble()`→`Assembled{flow_toml,plan_toml,sidecars,input_coordinate}`(Task 10)を Task 13 が一致して消費。`base_preamble(&PreambleOpts)`→`String`(Task 3)を Task 6/8 が一致使用。helper 名は各ファイル内 `pv`/`quote_path`/`typed_toml` で衝突なし(モジュール private)。`job_template`(Task 10 で `pub`)を Task 11 `render_describe` が使用 — 整合。
+**3. Type consistency:** `JobCtx`/`JobArtifacts`/`GeneratedFile`/`RecipeError`/`FlowRecipe`/`JobTemplate`/`PreambleOpts`(Task 2 定義)を Task 3/6/8/10/13 で同一シグネチャ使用。`assemble()`→`Assembled{flow_toml,plan_toml,sidecars,input_coordinate}`(Task 10)を Task 13 が一致して消費。`base_preamble(&PreambleOpts)`→`String`(Task 3)を Task 6/8 が一致使用。helper 名は各ファイル内 `pv`/`py_escape`(R3':run.py/parse.py の `{{JOB_DIR}}` へ差す Python 文字列リテラル内容エスケープ。g16_opt.rs/parse_g16_out.rs 各々モジュール private に同名定義・衝突なし)/`typed_toml` で衝突なし。`job_template`(Task 10 で `pub`)を Task 11 `render_describe` が使用 — 整合。
 
 ---
 
