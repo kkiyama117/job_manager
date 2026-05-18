@@ -41,15 +41,26 @@ enum Cmd {
         #[command(subcommand)]
         view: LsView,
     },
-    /// Scaffold a new flow: mint a UUID v7, create <root>/<uuid>/, and
-    /// write flow.toml + plan.toml boilerplate (a 2-job step1->step2 DAG).
+    /// Scaffold a new flow from a recipe (default `blank` = legacy 2-job
+    /// echo DAG). `jm new g16-opt-parse --param opt.charge=1`.
     New {
+        /// Flow recipe name. Omitted = `blank`.
+        recipe: Option<String>,
+        /// Repeatable `<JobId>.<param>=<value>`.
+        #[arg(long = "param", value_name = "JOBID.PARAM=VALUE")]
+        params: Vec<String>,
         /// Repeatable. KEY=VALUE pairs written into flow.toml [tags].
         #[arg(long = "tag", value_name = "KEY=VALUE")]
         tags: Vec<String>,
         /// Print only the created `<root>/<uuid>` path to stdout.
         #[arg(long)]
         print_path: bool,
+        /// List available recipes and exit.
+        #[arg(long)]
+        list: bool,
+        /// Describe the given recipe and exit.
+        #[arg(long)]
+        describe: bool,
     },
 }
 
@@ -88,11 +99,24 @@ async fn main() -> anyhow::Result<()> {
             cmd_doctor(&root, target.as_deref()).await
         }
         Cmd::New {
+            ref recipe,
+            ref params,
             ref tags,
             print_path,
+            list,
+            describe,
         } => {
+            if list {
+                print!("{}", job_manager::recipes::render_list());
+                return Ok(());
+            }
+            if describe {
+                let name = recipe.as_deref().unwrap_or("blank");
+                print!("{}", job_manager::recipes::render_describe(name)?);
+                return Ok(());
+            }
             let root = resolve_root(&cli)?;
-            cmd_new(&root, tags, print_path).await
+            cmd_new(&root, recipe.as_deref(), params, tags, print_path).await
         }
     }
 }
@@ -167,7 +191,7 @@ fn build_filter(a: &FilterArgs) -> anyhow::Result<job_manager::SearchFilter> {
 
     let mut tags = BTreeMap::new();
     for raw in &a.tag {
-        let (k, v) = parse_tag(raw)?;
+        let (k, v) = job_manager::recipes::flows::blank::parse_tag(raw)?;
         tags.insert(k, v);
     }
     let status = match &a.status {
@@ -417,160 +441,160 @@ async fn cmd_ls(root: &std::path::Path, view: &LsView) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_new(root: &std::path::Path, tags: &[String], print_path: bool) -> anyhow::Result<()> {
+async fn cmd_new(
+    root: &std::path::Path,
+    recipe: Option<&str>,
+    params: &[String],
+    tags: &[String],
+    print_path: bool,
+) -> anyhow::Result<()> {
     use job_manager::persistence::PathResolver;
+    use job_manager::recipes::flows::blank;
+
+    let recipe_name = recipe.unwrap_or("blank");
 
     let mut tag_map = BTreeMap::new();
     for raw in tags {
-        let (k, v) = parse_tag(raw)?;
-        tag_map.insert(k, v); // last value wins on duplicate key
+        let (k, v) = blank::parse_tag(raw)?;
+        tag_map.insert(k, v);
     }
 
     let uuid = uuid::Uuid::now_v7();
     let resolver = PathResolver::new(root);
     let flow_dir = resolver.flow_dir(&uuid);
-
     if flow_dir.exists() {
         anyhow::bail!("flow dir already exists: {}", flow_dir.display());
     }
     tokio::fs::create_dir_all(&flow_dir).await?;
-
     let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let flow_str = build_flow_template(&uuid, &created_at, &tag_map);
-    let plan_str = build_plan_template();
 
-    // Roll the freshly-created dir back if either write fails, so a
-    // half-written flow never lingers under <root>.
-    let write_both = || -> std::io::Result<()> {
-        atomic_write_str(&resolver.flow_toml(&uuid), &flow_str)?;
-        atomic_write_str(&resolver.plan_toml(&uuid), &plan_str)?;
-        Ok(())
+    let rollback = || {
+        if let Err(e) = std::fs::remove_dir_all(&flow_dir) {
+            eprintln!(
+                "warning: rollback failed to remove {}: {e}",
+                flow_dir.display()
+            );
+        }
     };
-    if let Err(e) = write_both() {
-        let _ = std::fs::remove_dir_all(&flow_dir);
-        return Err(anyhow::Error::new(e).context(format!(
-            "failed to write boilerplate under {}",
-            flow_dir.display()
-        )));
+
+    if recipe_name == "blank" {
+        let flow_str = blank::build_flow_template(&uuid, &created_at, &tag_map);
+        let plan_str = blank::build_plan_template();
+        let write_both = || -> std::io::Result<()> {
+            atomic_write_str(&resolver.flow_toml(&uuid), &flow_str)?;
+            atomic_write_str(&resolver.plan_toml(&uuid), &plan_str)?;
+            Ok(())
+        };
+        if let Err(e) = write_both() {
+            rollback();
+            return Err(anyhow::Error::new(e).context(format!(
+                "failed to write boilerplate under {}",
+                flow_dir.display()
+            )));
+        }
+    } else {
+        // R3' invariant: the JOB_DIR baked into run.py MUST be absolute,
+        // else it is re-resolved against SLURM's nondeterministic cwd at
+        // runtime — exactly the failure R3' eliminates. `--root` is
+        // canonicalized upstream so this never errs in practice; on the
+        // off chance it does, FAIL FAST (no silent relative fallback).
+        // No symlink resolution: keeps login<->compute mounts stable
+        // (spec §5.1). std::path::absolute is stable on the pinned
+        // nightly/edition-2024 toolchain.
+        let flow_dir_abs = match std::path::absolute(&flow_dir) {
+            Ok(p) => p,
+            Err(e) => {
+                rollback();
+                return Err(anyhow::Error::new(e).context(format!(
+                    "R3': failed to absolutize flow dir {}",
+                    flow_dir.display()
+                )));
+            }
+        };
+        let flow_recipe = match job_manager::recipes::find_flow(recipe_name) {
+            Ok(r) => r,
+            Err(e) => {
+                rollback();
+                return Err(anyhow::anyhow!(e));
+            }
+        };
+        let mut raw_params = BTreeMap::new();
+        for p in params {
+            if let Err(e) = job_manager::recipes::parse_param_arg(p, &mut raw_params) {
+                rollback();
+                return Err(anyhow::anyhow!(e));
+            }
+        }
+        let assembled = match job_manager::recipes::assemble(
+            flow_recipe.as_ref(),
+            &raw_params,
+            &tag_map,
+            &uuid,
+            &created_at,
+            &flow_dir_abs, // R3': absolute -> baked JOB_DIR is cwd-independent
+        ) {
+            Ok(a) => a,
+            Err(e) => {
+                rollback();
+                return Err(anyhow::anyhow!(e));
+            }
+        };
+
+        let do_writes = || -> std::io::Result<()> {
+            atomic_write_str(&resolver.flow_toml(&uuid), &assembled.flow_toml)?;
+            atomic_write_str(&resolver.plan_toml(&uuid), &assembled.plan_toml)?;
+            for f in &assembled.sidecars {
+                let dst = flow_dir.join(&f.relpath);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                atomic_write_str(&dst, &f.contents)?;
+                #[cfg(unix)]
+                if let Some(mode) = f.unix_mode {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(mode))?;
+                }
+            }
+            if let Some((job_id, src)) = &assembled.input_coordinate {
+                if !src.exists() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("input_coordinate not found: {}", src.display()),
+                    ));
+                }
+                let base = src.file_name().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "input_coordinate has no file name",
+                    )
+                })?;
+                let dst_dir = flow_dir.join(job_id).join("input");
+                std::fs::create_dir_all(&dst_dir)?;
+                std::fs::copy(src, dst_dir.join(base))?;
+            }
+            Ok(())
+        };
+        if let Err(e) = do_writes() {
+            rollback();
+            return Err(anyhow::Error::new(e).context(format!(
+                "failed to scaffold recipe {recipe_name} under {}",
+                flow_dir.display()
+            )));
+        }
     }
 
     if print_path {
         println!("{}", flow_dir.display());
     } else {
-        println!("created flow {uuid}");
+        println!("created flow {uuid} (recipe: {recipe_name})");
         println!("  {}", resolver.flow_toml(&uuid).display());
         println!("  {}", resolver.plan_toml(&uuid).display());
         println!(
-            "next: edit flow.toml, then `jm --root {} render {uuid}`",
+            "next: edit flow.toml/plan.toml, then `jm --root {} render {uuid}`",
             root.display()
         );
     }
     Ok(())
-}
-
-/// Split a `--tag KEY=VALUE` argument on the first `=`. The value may
-/// itself contain `=`. The key must be a TOML bare key
-/// (`[A-Za-z0-9_-]`, non-empty) so it can be written into `flow.toml`'s
-/// `[tags]` table without quoting; this fails fast here rather than as a
-/// cryptic `jm render` TOML error later.
-fn parse_tag(raw: &str) -> anyhow::Result<(String, String)> {
-    match raw.split_once('=') {
-        Some(("", _)) => {
-            anyhow::bail!("invalid --tag: empty key in {raw:?}")
-        }
-        Some((k, _))
-            if !k
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') =>
-        {
-            anyhow::bail!(
-                "invalid --tag: key {k:?} has non-bare-key characters (only A-Za-z0-9_- allowed)"
-            )
-        }
-        Some((k, v)) => Ok((k.to_string(), v.to_string())),
-        None => anyhow::bail!("invalid --tag: expected key=value, got {raw:?}"),
-    }
-}
-
-/// The `plan.toml` boilerplate. Static — every JobId in the flow
-/// template has a matching `[jobs.*]` table here.
-fn build_plan_template() -> String {
-    "\
-# Generated by `jm new`. Per-JobId params surface in batch.bash as
-# `JM_PARAM_<UPPER_NAME>`.
-# Schema: job_manager::plan::ExperimentPlan (deny_unknown_fields)
-
-[jobs.step1]
-note = \"TODO: replace with real render params\"
-
-[jobs.step2]
-note = \"TODO: replace with real render params\"
-"
-    .to_string()
-}
-
-/// The `flow.toml` boilerplate: a 2-job `step1 -> step2` (afterok) DAG.
-///
-/// `partition = "REPLACE_ME"` is written explicitly because `jm new`
-/// does not create `common.toml`; without it `jm render` would fail
-/// with `PartitionMissing`. REPLACE_ME lets `render` succeed while real
-/// `submit` fails fast until the user edits it.
-fn build_flow_template(
-    uuid: &uuid::Uuid,
-    created_at: &str,
-    tags: &BTreeMap<String, String>,
-) -> String {
-    let mut tag_lines = String::new();
-    if tags.is_empty() {
-        tag_lines.push_str("# free-form key=value tags; populate via `jm new --tag k=v`\n");
-    } else {
-        for (k, v) in tags {
-            // Keys are TOML bare-key-safe in practice (CLI-provided);
-            // values are TOML-escaped via the string serializer.
-            let v_toml = toml::Value::String(v.clone()).to_string();
-            tag_lines.push_str(&format!("{k} = {v_toml}\n"));
-        }
-    }
-
-    format!(
-        "\
-# Generated by `jm new` on {created_at}.
-# Schema: gaussian_job_shared::entities::workflow::JobFlow (deny_unknown_fields)
-#   uuid          UUID v7 — MUST equal the parent directory name
-#   created_at    RFC3339 UTC
-#   jobs.<JobId>  JobSpec (program/body/config) + parents[]
-
-uuid       = \"{uuid}\"
-created_at = \"{created_at}\"
-
-[tags]
-{tag_lines}
-# --- step 1: replace `program` / `body` with the real workload ---
-[jobs.step1]
-program = \"echo\"
-body    = \"echo \\\"[step1] flow=$JM_FLOW_UUID job=$JM_JOB_ID\\\"\\n\"
-
-[jobs.step1.config]
-# `jm new` does NOT create common.toml, so `partition` is written here
-# explicitly. REPLACE_ME makes `jm render` succeed but real `jm submit`
-# fail fast with \"invalid partition: REPLACE_ME\" until you set a real
-# partition (sinfo -s). Alternatively create <root>/common.toml with a
-# [slurm_default] partition and delete this line to inherit it.
-partition = \"REPLACE_ME\"
-
-# --- step 2: runs only if step1 exits 0 ---
-[jobs.step2]
-program = \"echo\"
-body    = \"echo \\\"[step2] flow=$JM_FLOW_UUID job=$JM_JOB_ID\\\"\\n\"
-
-[[jobs.step2.parents]]
-from = \"step1\"
-kind = \"afterok\"
-
-[jobs.step2.config]
-partition = \"REPLACE_ME\"
-"
-    )
 }
 
 /// Atomic write for `jm new`'s generated files. `persistence::atomic_write`
@@ -604,117 +628,6 @@ fn atomic_write_str(path: &std::path::Path, body: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_tag_splits_on_first_equals() {
-        assert_eq!(
-            parse_tag("a=b").unwrap(),
-            ("a".to_string(), "b".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_tag_keeps_later_equals_in_value() {
-        assert_eq!(
-            parse_tag("a=b=c").unwrap(),
-            ("a".to_string(), "b=c".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_tag_rejects_missing_equals() {
-        let err = parse_tag("abc").unwrap_err();
-        assert!(err.to_string().contains("expected key=value"), "got: {err}");
-    }
-
-    #[test]
-    fn parse_tag_rejects_empty_key() {
-        let err = parse_tag("=v").unwrap_err();
-        assert!(err.to_string().contains("empty key"), "got: {err}");
-    }
-
-    #[test]
-    fn parse_tag_rejects_non_bare_key() {
-        for bad in ["my key=v", "my.key=v", "k!=v"] {
-            let err = parse_tag(bad).unwrap_err();
-            assert!(
-                err.to_string().contains("non-bare-key"),
-                "got: {err} for {bad:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn plan_template_parses_as_experiment_plan() {
-        use job_manager::plan::ExperimentPlan;
-
-        let s = build_plan_template();
-        let plan: ExperimentPlan =
-            toml::from_str(&s).expect("plan template must parse as ExperimentPlan");
-
-        let keys: std::collections::BTreeSet<String> =
-            plan.jobs.keys().map(|j| j.0.clone()).collect();
-        assert_eq!(
-            keys,
-            ["step1", "step2"].iter().map(|s| s.to_string()).collect()
-        );
-    }
-
-    #[test]
-    fn flow_template_parses_with_two_step_dag_and_partition() {
-        use gaussian_job_shared::entities::workflow::JobFlow;
-
-        let uuid = uuid::Uuid::now_v7();
-        let created = "2026-05-16T00:00:00Z";
-        let s = build_flow_template(&uuid, created, &BTreeMap::new());
-
-        let flow: JobFlow =
-            toml::from_str(&s).expect("flow template must parse directly as JobFlow");
-
-        assert_eq!(flow.uuid, uuid);
-        let ids: std::collections::BTreeSet<String> =
-            flow.jobs.keys().map(|j| j.0.clone()).collect();
-        assert_eq!(
-            ids,
-            ["step1", "step2"].iter().map(|s| s.to_string()).collect()
-        );
-
-        // step2 depends on step1 via afterok.
-        let step2 = flow
-            .jobs
-            .get(&gaussian_job_shared::entities::workflow::JobId(
-                "step2".into(),
-            ))
-            .expect("step2 present");
-        assert_eq!(step2.parents.len(), 1);
-        assert_eq!(step2.parents[0].from.0, "step1");
-
-        // partition is present (REPLACE_ME) on both jobs so render won't hit
-        // PartitionMissing when common.toml is absent.
-        for (jid, job) in &flow.jobs {
-            assert_eq!(
-                job.spec.config.partition, "REPLACE_ME",
-                "job {} must carry REPLACE_ME partition",
-                jid.0
-            );
-        }
-    }
-
-    #[test]
-    fn flow_template_renders_tags_section() {
-        use gaussian_job_shared::entities::workflow::JobFlow;
-
-        let uuid = uuid::Uuid::now_v7();
-        let mut tags = BTreeMap::new();
-        tags.insert("env".to_string(), "prod".to_string());
-        tags.insert("owner".to_string(), "a=b".to_string()); // value with '='
-
-        let s = build_flow_template(&uuid, "2026-05-16T00:00:00Z", &tags);
-        let flow: JobFlow = toml::from_str(&s).expect("tagged flow template parses");
-
-        assert_eq!(flow.tags.get("env").map(String::as_str), Some("prod"));
-        assert_eq!(flow.tags.get("owner").map(String::as_str), Some("a=b"));
-    }
 
     #[test]
     fn cli_parses_ls_jobs_with_filters() {
