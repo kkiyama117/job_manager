@@ -177,11 +177,14 @@ jobs:
         uses: actions/attest@v4
         with:
           subject-path: 'wheels-*/*'
-      - name: Install uv
+      # NOTE: PyPI publishing is intentionally disabled while the package
+      # is under construction. The maturin-generated "Publish to PyPI"
+      # step was replaced with a GitHub Release that attaches the built
+      # wheels + sdist. Restore `uv publish` here once the package is
+      # ready to be released on PyPI.
+      - name: Create GitHub Release
         if: ${{ startsWith(github.ref, 'refs/tags/') }}
-        uses: astral-sh/setup-uv@v7
-      - name: Publish to PyPI
-        if: ${{ startsWith(github.ref, 'refs/tags/') }}
-        run: uv publish 'wheels-*/*'
-        env:
-          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: wheels-*/*
+          generate_release_notes: true
