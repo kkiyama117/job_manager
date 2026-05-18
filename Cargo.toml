@@ -41,6 +41,11 @@ toml = "1.1.2"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.23", features = ["serde", "v7"] }
 
+# Pure-Rust Jinja2-compatible template engine for the recipe shared
+# preamble (src/recipes/assets/_base.bash.j2). C/Python/pyo3 非依存 —
+# `jm --no-default-features` の libpython 非リンク契約に抵触しない。
+minijinja = "2"
+
 clap = { version = "4.6", features = ["derive"] }
 
 # upstream crates — Rust-only consumption (no extension-module).
