@@ -189,7 +189,13 @@ This mirrors Airflow's `default_args` inheritance and Prefect's Work Pool `base_
 
 ```bash
 # scaffold flow.toml + plan.toml under a fresh uuid
-jm --root /work new
+jm --root /work new                                          # blank 2-job echo DAG (legacy default)
+jm --root /work new blank                                    # same as above
+jm --root /work new g16-opt-parse \
+    --param opt.charge=1 \
+    --param opt.input_coordinate=mol.xyz                     # kudpc g16 opt → afterok → cclib parse
+jm --root /work new --list                                   # list available recipes; no scaffold
+jm --root /work new g16-opt-parse --describe                 # describe the recipe; no scaffold
 jm --root /work new --tag program=g16 --tag basis=6-31g    # attach key=value tags; --print-path prints the dir instead of the uuid
 
 # render every batch.bash + write .jm/flow.effective.toml snapshot
@@ -218,6 +224,25 @@ jm --root /work doctor [<flow_uuid>]
 ```
 
 `--root <path>` is required for every subcommand (including `ls`); `JM_ROOT=<path>` works as a fallback. Paths are canonicalized at entry (`..` and symlinks resolved). `<flow_uuid>` is a bare UUID string or an absolute path whose last component is the UUID.
+
+#### `jm new` — flow scaffolding
+
+`jm --root <ROOT> new` mints a UUID v7 and writes editable boilerplate under `<ROOT>/<uuid>/`.
+
+- `jm new` (or `jm new blank`) — legacy 2-job echo DAG (`step1 -> step2`, afterok). Byte-identical to the pre-recipe default.
+- `jm new g16-opt-parse [--param opt.charge=1] [--param opt.input_coordinate=mol.xyz]`
+  — self-contained kudpc g16 optimization → afterok → cclib `result.json`.
+  Generates `flow.toml` / `plan.toml` plus `<job>/scripts/{<job>.bash, run.py|parse.py}`
+  and `opt/input/main.gjf`. Cluster knobs (`launcher`, `scratch_root`, `g16_cmd`)
+  are `plan.toml` params surfaced to the scripts as `JM_PARAM_*`; set
+  `partition` / `resource_spec` via `[jobs.*.config]` or `<root>/common.toml`.
+- `jm new --list` / `jm new <recipe> --describe` — introspection only; no scaffold written.
+- `--tag k=v` attaches free-form tags to `flow.toml [tags]`; `--print-path` prints the
+  created directory instead of the UUID.
+
+After scaffolding, `jm doctor <uuid>` validates structural invariants (uuid↔dir, job/plan
+key parity, parent edges). `jm render <uuid>` then bakes `batch.bash` files with all
+`JM_PARAM_*` values exported.
 
 ### 2. From Python (async)
 

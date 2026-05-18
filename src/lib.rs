@@ -12,6 +12,7 @@ pub mod jobid;
 pub mod listing;
 pub mod persistence;
 pub mod plan;
+pub mod recipes;
 pub mod render;
 pub mod runner;
 pub mod search;
@@ -35,6 +36,7 @@ pub use persistence::{
     write_plan,
 };
 pub use plan::ExperimentPlan;
+pub use recipes::{FlowRecipe, JobTemplate, RecipeError};
 pub use render::render_batch_bash;
 pub use runner::{Decision, FlowRunner, TickResult, decide_transition};
 pub use search::{SearchFilter, matches};

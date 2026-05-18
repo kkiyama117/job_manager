@@ -127,3 +127,37 @@ Program-written per-job state. **Do not edit.**
 
 `lifecycle`: `Success|Failed|Skipped` are terminal (never overwritten by
 `tick`). Pending is the *absence* of `status.toml` (no enum value).
+
+## `jm new <recipe>` — generated scaffold layout
+
+`jm new g16-opt-parse` writes the following files under `<root>/<uuid>/` in addition to
+`flow.toml` and `plan.toml`:
+
+- `<job>/scripts/<job>.bash` — thin launcher (base preamble + `python scripts/run.py` or
+  `python scripts/parse.py`); chmod 0755.
+- `opt/scripts/run.py` — pure-stdlib g16 orchestrator: `prepare_inputs` → `subprocess.run`
+  with `cwd=scratch` → `finally` copy-back to `output/`; exit code mirrors g16 rc.
+- `parse/scripts/parse.py` — cclib parser writing `output/result.json`
+  (`{"schema":"jm-recipe/1", "converged": bool, "scf_energy": float, "n_atoms": int, ...}`).
+- `opt/input/main.gjf` — Gaussian input template with charge/multiplicity/geometry filled in.
+
+**`JM_PARAM_*` recipe params.** `plan.toml [jobs.opt]` contains `launcher`, `scratch_root`,
+and `g16_cmd`. `jm render` exports these as `JM_PARAM_LAUNCHER`, `JM_PARAM_SCRATCH_ROOT`,
+and `JM_PARAM_G16_CMD` in `batch.bash`. The scripts read them at runtime to control the
+launch command, scratch directory, and Gaussian binary — edit `plan.toml` and re-run `jm render`
+to update without re-scaffolding.
+
+**`# REPLACE_ME` sentinel.** Lines marked `# REPLACE_ME` in the generated scripts are
+swap-in points for site-specific tooling (e.g. `python -m gaussian_compute_runtime`). The
+scaffolded scripts are self-contained without that tooling.
+
+**v1 caveats.**
+
+- `JM_PARAM_LAUNCHER` is passed as a single command token (e.g. `srun`). A multi-word value
+  such as `srun --ntasks=1` is not shell-split and will cause a launch failure (non-silent —
+  `run.py` exits non-zero). Use a single launcher command name in v1.
+- `opt.input_coordinate` auto-converts only `.xyz` files in v1. A non-`.xyz` coordinate file
+  is copied into `opt/input/` but the gjf geometry block is left as an explicit `REPLACE_ME`
+  placeholder to fill manually.
+- `extra_input` content is appended after the geometry block in `main.gjf`; a trailing
+  newline is always added by the scaffold to satisfy Gaussian's blank-line terminator rule.
