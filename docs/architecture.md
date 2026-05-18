@@ -99,7 +99,7 @@ src/
 ├── walk.rs                 # walk_flows — async stream over <root>/*
 │
 ├── bin/
-│   ├── jm.rs               # CLI binary (clap, 5 subcommands)
+│   ├── jm.rs               # CLI binary (clap, 7 subcommands)
 │   └── stub_gen.rs         # pyo3-stub-gen entry — generates .pyi
 │
 └── py_export/              # PyO3 surface (cfg-gated, `pyo3` feature)
@@ -281,6 +281,29 @@ exhaust file descriptors. Errors per entry surface as `Err` stream
 items rather than aborting the stream — one malformed `flow.toml` does
 not hide the rest.
 
+### `jm ls jobs|flows|tree` (read-only cross-flow listing)
+
+```
+jm ls  ──► listing::collect(root, common, _filter)
+             │  walk_flows → per-flow JobFlow
+             │  read_job_run per job (spawn_blocking)
+             │  missing/unreadable status.toml → Pending
+             ▼
+           Vec<CollectedFlow>  (newest-first by created_at)
+             │
+             ├─ job_rows  → matches (search::matches per job) → Vec<JobRow>
+             │               └─ format_jobs_table / format_jobs_json
+             │
+             ├─ flow_rows → matched_flows (any-job-passes) → Vec<FlowRow>
+             │               └─ format_flows_table / format_flows_json
+             │
+             └─ matched_flows → format_tree (topo order, parent edges)
+```
+
+This path is entirely read-only: no SLURM (`tick` must be run separately
+to reconcile `.status.toml` before listing reflects current SLURM state).
+`search::matches` and all `listing::format_*` functions are pure.
+
 ## Lifecycle model (5 values)
 
 ```
@@ -373,7 +396,7 @@ in Python; mutation only happens in Rust via `FlowRunner::submit` /
 ## CLI (`jm`)
 
 The `jm` binary (`src/bin/jm.rs`) is built alongside the library and
-exposes 5 subcommands wired to `FlowRunner` via clap:
+exposes 7 subcommands wired to `FlowRunner` via clap:
 
 | Subcommand | Action | Executor / Querier pair |
 |---|---|---|
@@ -381,10 +404,14 @@ exposes 5 subcommands wired to `FlowRunner` via clap:
 | `submit <uuid> [--dry-run]` | render + sbatch + write `.status.toml` | `--dry-run` → `DryRun + InMemory`; else `SbatchExecutor + SlurmQuerier` |
 | `tick <uuid>` | query SLURM and apply transitions | `DryRunExecutor + SlurmQuerier` (executor unused) |
 | `show <uuid>` | read flow + per-job `.status.toml` | (none; pure reads) |
-| `search [--program X]` | walk all flows under `--root`, filter | (none) |
+| `doctor [<uuid>]` | validate TOML + structural invariants | (none; pure reads) |
+| `ls jobs\|flows\|tree [filters]` | read-only cross-flow listing (supersedes removed `search`) | (none; pure reads + `listing::collect`) |
+| `new [--tag KEY=VALUE]` | scaffold a new flow: mint UUID v7, write `flow.toml` + `plan.toml` boilerplate | (none; pure writes) |
+
+> Note: `jm search` was removed and superseded by `jm ls jobs` (with richer filter and output options).
 
 `--root <path>` or `JM_ROOT=<path>` is required for every subcommand
-including `search`. Paths are canonicalized at entry.
+(including `ls`). Paths are canonicalized at entry.
 
 ## Testing surface
 
@@ -403,7 +430,7 @@ crates can write deterministic tests without a live SLURM cluster.
 
 `MockExecutor` records every submitted `SbatchCmd` (poison-recovery
 `Mutex` so a panicked test still surfaces the recorded calls). The
-test suite of 100+ tests exercises submit, tick, render, search, and
+test suite of 100+ tests exercises submit, tick, render, walk/filter, and
 all transition rules.
 
 ## common.toml as Pool template (Airflow / Prefect mapping)
@@ -431,7 +458,6 @@ materialized snapshot で、Cargo.lock パターンに対応する。`flow.toml`
 Not implemented here (see GitHub issue #13 for the deferred review
 followups from PR #12):
 
-- jm `search` UX (positional vs global `--root`)
 - `FlowRunner` split (`FlowSubmitter` / `FlowTicker` / `FlowRenderer`)
 - TOML read size limit (DoS hardening)
 - `JobState` enum exhaustiveness with respect to A1 evolution

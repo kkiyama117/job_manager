@@ -1,18 +1,20 @@
 //! `SearchFilter` and the pure `matches()` predicate.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use gaussian_job_shared::entities::workflow::{Job, JobFlow, JobId, Program};
 
-use crate::job::lifecycle::Lifecycle;
 use crate::job::run::JobRun;
+use crate::listing::DisplayLifecycle;
 
 #[derive(Debug, Clone, Default)]
 pub struct SearchFilter {
     pub program: Option<Program>,
     pub tags: BTreeMap<String, String>,
-    pub status: Option<Lifecycle>,
+    /// Status filter: empty means unconstrained; non-empty means the job's
+    /// [`DisplayLifecycle`] must be in this set (OR semantics).
+    pub status: BTreeSet<DisplayLifecycle>,
     pub flow_uuid_prefix: Option<String>,
     pub created_after: Option<DateTime<Utc>>,
     pub created_before: Option<DateTime<Utc>>,
@@ -41,10 +43,13 @@ pub fn matches(
             }
         }
     }
-    if let Some(want) = f.status {
-        match status {
-            Some(e) if e.lifecycle == want => {}
-            _ => return false,
+    if !f.status.is_empty() {
+        let dl = match status {
+            Some(jr) => DisplayLifecycle::Real(jr.lifecycle),
+            None => DisplayLifecycle::Pending,
+        };
+        if !f.status.contains(&dl) {
+            return false;
         }
     }
     if let Some(ref prefix) = f.flow_uuid_prefix
@@ -85,6 +90,9 @@ mod tests {
     use slurm_async_runner::entities::slurm::SlurmJobConfig;
     use std::collections::BTreeMap;
     use uuid::Uuid;
+
+    use crate::job::lifecycle::Lifecycle;
+    use crate::listing::DisplayLifecycle;
 
     fn cfg() -> SlurmJobConfig {
         SlurmJobConfig {
@@ -163,8 +171,10 @@ mod tests {
     #[test]
     fn status_filter_requires_status_entry() {
         let (f, id, j) = make_flow(Uuid::now_v7(), BTreeMap::new());
+        let mut want = std::collections::BTreeSet::new();
+        want.insert(DisplayLifecycle::Real(Lifecycle::Queued));
         let filt = SearchFilter {
-            status: Some(Lifecycle::Queued),
+            status: want,
             ..Default::default()
         };
         assert!(!matches(&f, &id, &j, None, &filt));
@@ -211,5 +221,67 @@ mod tests {
             ..Default::default()
         };
         assert!(!matches(&f, &id, &j, Some(&entry), &filt_no));
+    }
+
+    #[test]
+    fn status_set_empty_matches_any() {
+        let (f, id, j) = make_flow(Uuid::now_v7(), BTreeMap::new());
+        let filt = SearchFilter::default();
+        assert!(matches(&f, &id, &j, None, &filt)); // Pending unconstrained
+        let any_run = JobRun {
+            lifecycle: Lifecycle::Running,
+            updated_at: Utc::now(),
+            slurm_jobid: None,
+            slurm_status: None,
+            note: None,
+        };
+        assert!(matches(&f, &id, &j, Some(&any_run), &filt)); // Real also unconstrained
+    }
+
+    #[test]
+    fn status_set_or_matches_running_or_failed() {
+        let (f, id, j) = make_flow(Uuid::now_v7(), BTreeMap::new());
+        let mut want = std::collections::BTreeSet::new();
+        want.insert(DisplayLifecycle::Real(Lifecycle::Running));
+        want.insert(DisplayLifecycle::Real(Lifecycle::Failed));
+        let filt = SearchFilter {
+            status: want,
+            ..Default::default()
+        };
+
+        let running = JobRun {
+            lifecycle: Lifecycle::Running,
+            updated_at: Utc::now(),
+            slurm_jobid: None,
+            slurm_status: None,
+            note: None,
+        };
+        assert!(matches(&f, &id, &j, Some(&running), &filt));
+
+        let queued = JobRun {
+            lifecycle: Lifecycle::Queued,
+            ..running.clone()
+        };
+        assert!(!matches(&f, &id, &j, Some(&queued), &filt));
+    }
+
+    #[test]
+    fn status_set_pending_matches_missing_status() {
+        let (f, id, j) = make_flow(Uuid::now_v7(), BTreeMap::new());
+        let mut want = std::collections::BTreeSet::new();
+        want.insert(DisplayLifecycle::Pending);
+        let filt = SearchFilter {
+            status: want,
+            ..Default::default()
+        };
+        assert!(matches(&f, &id, &j, None, &filt)); // no JobRun == Pending
+        let running = JobRun {
+            lifecycle: Lifecycle::Running,
+            updated_at: Utc::now(),
+            slurm_jobid: None,
+            slurm_status: None,
+            note: None,
+        };
+        assert!(!matches(&f, &id, &j, Some(&running), &filt));
     }
 }

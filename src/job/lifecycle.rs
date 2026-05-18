@@ -2,7 +2,13 @@
 //!
 //! Pending は enum value にしない (ファイル不在で表現)。
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+// Variant order is the state-machine progression (Queued < Running < terminal).
+// `Ord`/`PartialOrd` are derived so `Lifecycle` (and `DisplayLifecycle`) can be
+// stored in a `BTreeSet` and used by listing aggregation; the relative order of
+// the terminal variants (Success/Failed/Skipped) carries no domain meaning.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Lifecycle {
     Queued,
