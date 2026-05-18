@@ -32,9 +32,12 @@ def _stub_bin(tmp: Path, name: str, script: str) -> None:
 
 
 def _run(job: Path, env: dict) -> subprocess.CompletedProcess:
+    # R3' (a) / H1 regression: mirror the scaffold — launch run.py by an
+    # ABSOLUTE path from a cwd that is NOT the job dir. This proves run.py is
+    # cwd-independent (the previous `cwd=job` masked the launcher gap).
     return subprocess.run(
-        [sys.executable, "scripts/run.py"],
-        cwd=job,
+        [sys.executable, str(job / "scripts" / "run.py")],
+        cwd=job.parent,
         env=env,
         capture_output=True,
         text=True,

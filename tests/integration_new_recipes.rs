@@ -75,7 +75,15 @@ fn scaffold_g16_opt_parse_writes_all_files() {
         !flow.contains("cd "),
         "R3': flow.toml must not cd; got:\n{flow}"
     );
-    assert!(flow.contains("bash scripts/opt.bash"));
+    // R3' (a): absolute launcher path, never the relative form (H1 fix).
+    assert!(
+        flow.contains(&format!("bash \"{}/opt/scripts/opt.bash\"", dir.display())),
+        "flow.toml body must use absolute launcher; got:\n{flow}"
+    );
+    assert!(
+        !flow.contains("bash scripts/opt.bash"),
+        "H1 regression: flow.toml must not use a relative launcher; got:\n{flow}"
+    );
 
     let gjf = fs::read_to_string(dir.join("opt/input/main.gjf")).unwrap();
     assert!(gjf.contains("1 1"));
@@ -84,7 +92,11 @@ fn scaffold_g16_opt_parse_writes_all_files() {
     let optbash = fs::read_to_string(dir.join("opt/scripts/opt.bash")).unwrap();
     assert!(optbash.contains("unset -f conda"));
     assert!(optbash.contains("module restore gaussian_A -f"));
-    assert!(optbash.contains("python scripts/run.py"));
+    assert!(optbash.contains(&format!("python \"{}/opt/scripts/run.py\"", dir.display())));
+    assert!(
+        !optbash.contains("python scripts/run.py"),
+        "H1 regression: opt.bash must launch run.py by absolute path"
+    );
     assert!(!optbash.contains("srun"));
 
     assert!(dir.join("opt/scripts/run.py").exists());

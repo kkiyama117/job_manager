@@ -25,9 +25,12 @@ def _materialize(tmp: Path, input_rel: str) -> Path:
 
 
 def _run(job: Path) -> subprocess.CompletedProcess:
+    # R3' (a) / H1 regression: launch parse.py by an ABSOLUTE path from a cwd
+    # that is NOT the job dir, proving parse.py is cwd-independent (the
+    # previous `cwd=job` masked the launcher gap).
     return subprocess.run(
-        [sys.executable, "scripts/parse.py"],
-        cwd=job,
+        [sys.executable, str(job / "scripts" / "parse.py")],
+        cwd=job.parent,
         capture_output=True,
         text=True,
     )

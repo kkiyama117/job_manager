@@ -67,10 +67,16 @@ impl JobTemplate for ParseG16Out {
             .replace("{{JOB_DIR}}", &py_escape(&abs_job_dir)) // R3': cwd-independent
             .replace("{{INPUT_REL}}", &input_rel);
 
+        // R3'(a・暫定 — review H1 / 追跡 issue): parse.py を **絶対パス**で
+        // 起動し cwd 非依存にする(cd 無し)。v2 で (b)/(c) へ移行し撤回予定。
+        let parse_py_invocation = format!(
+            "python \"{}\"",
+            abs_job_dir.join("scripts/parse.py").display()
+        );
         let bash = base_preamble(&PreambleOpts {
             conda_env: pv(ctx, "conda_env"),
             module_block: "module restore default -f",
-            body_block: "python scripts/parse.py",
+            body_block: &parse_py_invocation,
             pixi_manifest: pv(ctx, "pixi_manifest"),
         });
 
@@ -96,8 +102,9 @@ impl JobTemplate for ParseG16Out {
             );
         }
 
-        // R3': body は薄起動子のみ。cd 無し(入出力は parse.py の JOB_DIR 絶対定数)。
-        let body = format!("bash scripts/{job_id}.bash\n");
+        // R3'(a・暫定): body も **絶対パス**の薄起動子(cd 無し)。相対
+        // `bash scripts/...` は SLURM 起動段階で No such file or directory。
+        let body = format!("bash \"{}/scripts/{job_id}.bash\"\n", abs_job_dir.display());
 
         Ok(JobArtifacts {
             program: "python".to_string(),
@@ -143,9 +150,13 @@ mod tests {
 
         assert_eq!(a.program, "python");
         assert_eq!(a.time_limit.as_deref(), Some("01:00:00"));
-        // R3': body has NO cd.
-        assert_eq!(a.body, "bash scripts/parse.bash\n");
+        // R3' (a): body has NO cd AND uses an ABSOLUTE launcher path (H1 fix).
+        assert_eq!(a.body, "bash \"/r/u/parse/scripts/parse.bash\"\n");
         assert!(!a.body.contains("cd "), "R3': body must not cd");
+        assert!(
+            !a.body.contains("bash scripts/"),
+            "H1 regression: body must not use a relative launcher path"
+        );
 
         let bash = a
             .sidecars
@@ -153,7 +164,14 @@ mod tests {
             .find(|f| f.relpath.ends_with("scripts/parse.bash"))
             .unwrap();
         assert!(bash.contents.contains("module restore default -f"));
-        assert!(bash.contents.contains("python scripts/parse.py"));
+        assert!(
+            bash.contents
+                .contains("python \"/r/u/parse/scripts/parse.py\"")
+        );
+        assert!(
+            !bash.contents.contains("python scripts/parse.py"),
+            "H1 regression: parse.py must be launched by absolute path"
+        );
 
         let py = a
             .sidecars
