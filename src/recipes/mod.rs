@@ -24,14 +24,19 @@ pub fn recipe_registry() -> Vec<Box<dyn FlowRecipe>> {
     vec![Box::new(G16OptParse)]
 }
 
+/// scaffold 可能名の一覧文字列(エラー候補列挙用)。`blank` は registry 外
+/// だが利用者視点では選択肢なので先頭に足す。registry が単一ソース。
+pub fn available_flow_names() -> String {
+    let mut names = vec!["blank".to_string()];
+    names.extend(recipe_registry().iter().map(|r| r.name().to_string()));
+    names.join(", ")
+}
+
 pub fn find_flow(name: &str) -> Result<Box<dyn FlowRecipe>, RecipeError> {
-    match name {
-        "g16-opt-parse" => Ok(Box::new(G16OptParse)),
-        other => Err(RecipeError::UnknownFlow(
-            other.to_string(),
-            "blank, g16-opt-parse".to_string(),
-        )),
-    }
+    recipe_registry()
+        .into_iter()
+        .find(|r| r.name() == name)
+        .ok_or_else(|| RecipeError::UnknownFlow(name.to_string(), available_flow_names()))
 }
 
 /// `--param <JobId>.<param>=<value>` を ((job,param) -> value) に。
