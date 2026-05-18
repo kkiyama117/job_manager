@@ -14,7 +14,7 @@ import tempfile
 
 SCHEMA = "jm-recipe/1"
 # R3': scaffold swaps these at generate time. parse.py never reads
-# os.getcwd(), so SLURM's nondeterministic submit cwd cannot break it
+# the process working directory, so SLURM's nondeterministic submit cwd cannot break it
 # (same cwd-independence as the reference run-g16 / parse-results).
 JOB_DIR = "{{JOB_DIR}}"
 INPUT_REL = "{{INPUT_REL}}"
