@@ -4,6 +4,7 @@
 //! `jm --no-default-features` でクリーンビルドされる。
 
 pub mod job;
+pub mod xyz;
 
 pub use job::{
     FlowRecipe, GeneratedFile, JobArtifacts, JobCtx, JobTemplate, PreambleOpts, RecipeError,
