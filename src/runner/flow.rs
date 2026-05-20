@@ -266,6 +266,18 @@ impl<'r> FlowRunner<'r> {
                 .remove(jid)
                 .expect("preflight resolved the effective config for every submitted job");
             let mut cmd = SbatchCmd::new(batch_path.clone());
+            // Per-job chdir: recipes (`jm new <recipe>`) emit thin relative
+            // launchers like `bash scripts/<id>.bash`, whose sidecars live
+            // at `<flow_dir>/<job_id>/scripts/` (NOT `.jm/`). SLURM's
+            // default job cwd is the `jm submit` invocation cwd, which a
+            // single submit cannot satisfy across multiple jobs. Pinning
+            // chdir to `<flow_dir>/<job_id>/` for every job makes relative
+            // launchers resolve and is the permanent replacement for the
+            // PR #27 interim absolute-path body fix (issue #29). The
+            // `blank` flow's user-authored body is unaffected — it can
+            // either keep cwd-independent launches or rely on the same
+            // per-job dir.
+            cmd.chdir = Some(self.resolver.flow_dir(&fr.flow_uuid).join(&jid.0));
             cmd.partition = Some(config.partition.clone());
             cmd.time_limit = config.time_limit;
             cmd.rsc = config.resource_spec.clone();
@@ -592,6 +604,62 @@ mod tests {
             submitted.get(&JobId("test_job".to_string())),
             Some(&777),
             "expected the job to be submitted with the mocked jobid"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_sets_per_job_chdir_to_flow_dir_job_id() {
+        // (b) issue #29 / PR #27 H1 revoke: every job submitted via
+        // `FlowRunner::submit` must carry `SbatchCmd.chdir =
+        // Some(<flow_dir>/<job_id>/)` so the recipe-emitted relative
+        // launcher (`bash scripts/<id>.bash`) resolves under SLURM. This
+        // replaces the (a) interim absolute-path body fix.
+        use async_trait::async_trait;
+        use std::sync::{Arc, Mutex};
+
+        struct CapturingExecutor {
+            last_cmd: Arc<Mutex<Option<SbatchCmd>>>,
+            jobid: u64,
+        }
+        #[async_trait]
+        impl Executor for CapturingExecutor {
+            async fn submit(&self, cmd: SbatchCmd) -> Result<u64, JobManagerError> {
+                *self.last_cmd.lock().unwrap() = Some(cmd);
+                Ok(self.jobid)
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let resolver = PathResolver::new(dir.path());
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let fr = fr_with_log_stdout(Some(dir.path().join("logs/%j.out")));
+
+        let last_cmd: Arc<Mutex<Option<SbatchCmd>>> = Arc::new(Mutex::new(None));
+        let runner = FlowRunner::new(
+            Box::new(CapturingExecutor {
+                last_cmd: last_cmd.clone(),
+                jobid: 555,
+            }),
+            Box::new(InMemoryQuerier::new(HashMap::new())),
+            &resolver,
+        );
+
+        runner
+            .submit(&fr, false)
+            .await
+            .expect("submit must succeed");
+        let cmd = last_cmd
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("submit captured a SbatchCmd");
+        let expected = resolver
+            .flow_dir(&fr.flow_uuid)
+            .join(JobId("test_job".to_string()).0.as_str());
+        assert_eq!(
+            cmd.chdir.as_deref(),
+            Some(expected.as_path()),
+            "(b): per-job SbatchCmd.chdir must equal <flow_dir>/<job_id>/"
         );
     }
 
