@@ -75,14 +75,16 @@ fn scaffold_g16_opt_parse_writes_all_files() {
         !flow.contains("cd "),
         "R3': flow.toml must not cd; got:\n{flow}"
     );
-    // R3' (a): absolute launcher path, never the relative form (H1 fix).
+    // (b): RELATIVE launcher. SLURM job cwd is pinned to `<flow_dir>/<id>/`
+    // by FlowRunner::submit via per-job `SbatchCmd.chdir` (issue #29 / PR #27
+    // H1 revoke of the interim (a) absolute-path fix).
     assert!(
-        flow.contains(&format!("bash \"{}/opt/scripts/opt.bash\"", dir.display())),
-        "flow.toml body must use absolute launcher; got:\n{flow}"
+        flow.contains("bash scripts/opt.bash"),
+        "flow.toml body must use relative launcher; got:\n{flow}"
     );
     assert!(
-        !flow.contains("bash scripts/opt.bash"),
-        "H1 regression: flow.toml must not use a relative launcher; got:\n{flow}"
+        !flow.contains(&format!("\"{}/opt/scripts", dir.display())),
+        "(b) revoke (a): flow.toml must not use an absolute launcher; got:\n{flow}"
     );
 
     let gjf = fs::read_to_string(dir.join("opt/input/main.gjf")).unwrap();
@@ -92,10 +94,10 @@ fn scaffold_g16_opt_parse_writes_all_files() {
     let optbash = fs::read_to_string(dir.join("opt/scripts/opt.bash")).unwrap();
     assert!(optbash.contains("unset -f conda"));
     assert!(optbash.contains("module restore gaussian_A -f"));
-    assert!(optbash.contains(&format!("python \"{}/opt/scripts/run.py\"", dir.display())));
+    assert!(optbash.contains("python scripts/run.py"));
     assert!(
-        !optbash.contains("python scripts/run.py"),
-        "H1 regression: opt.bash must launch run.py by absolute path"
+        !optbash.contains(&format!("python \"{}/opt/scripts", dir.display())),
+        "(b) revoke (a): opt.bash must launch run.py by a relative path"
     );
     assert!(!optbash.contains("srun"));
 

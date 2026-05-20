@@ -175,14 +175,14 @@ impl JobTemplate for G16Opt {
             .replace("{{JOB_DIR}}", &py_escape(&abs_job_dir)); // R3': cwd-independent
 
         let module_block = format!("module restore {} -f", pv(ctx, "module_profile"));
-        // R3'(a・暫定 — review H1 / 追跡 issue): SLURM ジョブ cwd は
-        // `jm submit` 投入 cwd であって job dir ではない。run.py を **絶対
-        // パス**で起動して cwd 非依存にする(cd 無し)。v2 で (b) per-job
-        // cmd.chdir / (c) `python -m` へ移行し、この絶対化は撤回予定。
-        let run_py_invocation = format!(
-            "python \"{}\"",
-            abs_job_dir.join("scripts/run.py").display()
-        );
+        // R3' + (b): SLURM job cwd is pinned to `<flow_dir>/<job_id>/` by
+        // FlowRunner::submit setting per-job `SbatchCmd.chdir`, so a thin
+        // relative launcher resolves. run.py / parse.py remain
+        // cwd-independent internally via the baked absolute `JOB_DIR`
+        // constant — this is the R3' invariant the (a) interim fix
+        // (PR #27 / issue #29) protected by absolute body paths; (b)
+        // hands that responsibility back to the submit layer.
+        let run_py_invocation = "python scripts/run.py".to_string();
         let bash = base_preamble(&PreambleOpts {
             conda_env: pv(ctx, "conda_env"),
             module_block: &module_block,
@@ -217,9 +217,11 @@ impl JobTemplate for G16Opt {
             plan_params.insert(rp.name.to_string(), typed_toml(rp.ty, pv(ctx, rp.name)));
         }
 
-        // R3'(a・暫定): body も **絶対パス**の薄起動子(cd 無し)。相対
-        // `bash scripts/...` は SLURM 起動段階で No such file or directory。
-        let body = format!("bash \"{}/scripts/{job_id}.bash\"\n", abs_job_dir.display());
+        // (b): body is a thin RELATIVE launcher. The SLURM job cwd is
+        // pinned to `<flow_dir>/<job_id>/` by FlowRunner::submit via
+        // per-job `SbatchCmd.chdir`, so `scripts/<id>.bash` resolves
+        // (issue #29 / PR #27 H1 revoke of the interim (a) fix).
+        let body = format!("bash scripts/{job_id}.bash\n");
 
         Ok(JobArtifacts {
             program: "g16".to_string(),
@@ -270,16 +272,14 @@ mod tests {
 
         assert_eq!(a.program, "g16");
         assert_eq!(a.time_limit.as_deref(), Some("48:00:00"));
-        // R3' (a): body has NO cd AND uses an ABSOLUTE launcher path
-        // (cwd-independent under SLURM — H1 fix).
-        assert_eq!(
-            a.body,
-            "bash \"/work/root/01999999-0000-7000-8000-000000000000/opt/scripts/opt.bash\"\n"
-        );
+        // (b): body is a thin RELATIVE launcher; the SLURM job cwd is
+        // pinned to `<flow_dir>/<job_id>/` by FlowRunner::submit via
+        // per-job `SbatchCmd.chdir` (issue #29 / PR #27 H1 revoke of (a)).
+        assert_eq!(a.body, "bash scripts/opt.bash\n");
         assert!(!a.body.contains("cd "), "R3': body must not cd");
         assert!(
-            !a.body.contains("bash scripts/"),
-            "H1 regression: body must not use a relative launcher path"
+            !a.body.contains(" \"/"),
+            "(b) revoke (a): body must not use an absolute launcher path"
         );
 
         let bash = a
@@ -290,12 +290,10 @@ mod tests {
         assert_eq!(bash.unix_mode, Some(0o755));
         assert!(bash.contents.contains("module restore gaussian_A -f"));
         assert!(bash.contents.contains("conda activate analysis"));
-        assert!(bash.contents.contains(
-            "python \"/work/root/01999999-0000-7000-8000-000000000000/opt/scripts/run.py\""
-        ));
+        assert!(bash.contents.contains("python scripts/run.py"));
         assert!(
-            !bash.contents.contains("python scripts/run.py"),
-            "H1 regression: run.py must be launched by absolute path"
+            !bash.contents.contains("python \"/"),
+            "(b) revoke (a): run.py must be launched by a relative path"
         );
         assert!(!bash.contents.contains("srun"), "srun lives in run.py");
 

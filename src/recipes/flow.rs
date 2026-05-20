@@ -289,13 +289,14 @@ mod tests {
             "R3': flow.toml body must not cd; got:\n{}",
             a.flow_toml
         );
-        // R3' (a): absolute launcher path, never the relative form (H1 fix).
-        assert!(a.flow_toml.contains(
-            "bash \"/work/root/01999999-0000-7000-8000-0000000000ab/opt/scripts/opt.bash\""
-        ));
+        // (b): RELATIVE launcher in flow.toml; SLURM job cwd is pinned to
+        // `<flow_dir>/<id>/` by FlowRunner::submit via per-job
+        // `SbatchCmd.chdir` (issue #29 / PR #27 H1 revoke of (a)).
+        assert!(a.flow_toml.contains("bash scripts/opt.bash"));
         assert!(
-            !a.flow_toml.contains("bash scripts/opt.bash"),
-            "H1 regression: flow.toml must not use a relative launcher; got:\n{}",
+            !a.flow_toml
+                .contains("\"/work/root/01999999-0000-7000-8000-0000000000ab/opt/scripts"),
+            "(b) revoke (a): flow.toml must not use an absolute launcher; got:\n{}",
             a.flow_toml
         );
         let runpy = a
@@ -303,6 +304,8 @@ mod tests {
             .iter()
             .find(|f| f.relpath.ends_with("opt/scripts/run.py"))
             .unwrap();
+        // R3' invariant survives (b): the baked absolute JOB_DIR keeps
+        // run.py internally cwd-independent regardless of the launcher form.
         assert!(
             runpy
                 .contents

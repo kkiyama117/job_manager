@@ -67,12 +67,12 @@ impl JobTemplate for ParseG16Out {
             .replace("{{JOB_DIR}}", &py_escape(&abs_job_dir)) // R3': cwd-independent
             .replace("{{INPUT_REL}}", &input_rel);
 
-        // R3'(a・暫定 — review H1 / 追跡 issue): parse.py を **絶対パス**で
-        // 起動し cwd 非依存にする(cd 無し)。v2 で (b)/(c) へ移行し撤回予定。
-        let parse_py_invocation = format!(
-            "python \"{}\"",
-            abs_job_dir.join("scripts/parse.py").display()
-        );
+        // R3' + (b): SLURM job cwd is pinned to `<flow_dir>/<job_id>/` by
+        // FlowRunner::submit setting per-job `SbatchCmd.chdir`, so a thin
+        // relative launcher resolves. parse.py remains cwd-independent
+        // internally via the baked absolute `JOB_DIR` constant — (b)
+        // revokes the (a) absolute body fix (PR #27 / issue #29).
+        let parse_py_invocation = "python scripts/parse.py".to_string();
         let bash = base_preamble(&PreambleOpts {
             conda_env: pv(ctx, "conda_env"),
             module_block: "module restore default -f",
@@ -102,9 +102,11 @@ impl JobTemplate for ParseG16Out {
             );
         }
 
-        // R3'(a・暫定): body も **絶対パス**の薄起動子(cd 無し)。相対
-        // `bash scripts/...` は SLURM 起動段階で No such file or directory。
-        let body = format!("bash \"{}/scripts/{job_id}.bash\"\n", abs_job_dir.display());
+        // (b): body is a thin RELATIVE launcher. The SLURM job cwd is
+        // pinned to `<flow_dir>/<job_id>/` by FlowRunner::submit via
+        // per-job `SbatchCmd.chdir`, so `scripts/<id>.bash` resolves
+        // (issue #29 / PR #27 H1 revoke of the interim (a) fix).
+        let body = format!("bash scripts/{job_id}.bash\n");
 
         Ok(JobArtifacts {
             program: "python".to_string(),
@@ -150,12 +152,14 @@ mod tests {
 
         assert_eq!(a.program, "python");
         assert_eq!(a.time_limit.as_deref(), Some("01:00:00"));
-        // R3' (a): body has NO cd AND uses an ABSOLUTE launcher path (H1 fix).
-        assert_eq!(a.body, "bash \"/r/u/parse/scripts/parse.bash\"\n");
+        // (b): body is a thin RELATIVE launcher; the SLURM job cwd is
+        // pinned to `<flow_dir>/<job_id>/` by FlowRunner::submit via
+        // per-job `SbatchCmd.chdir` (issue #29 / PR #27 H1 revoke of (a)).
+        assert_eq!(a.body, "bash scripts/parse.bash\n");
         assert!(!a.body.contains("cd "), "R3': body must not cd");
         assert!(
-            !a.body.contains("bash scripts/"),
-            "H1 regression: body must not use a relative launcher path"
+            !a.body.contains(" \"/"),
+            "(b) revoke (a): body must not use an absolute launcher path"
         );
 
         let bash = a
@@ -164,13 +168,10 @@ mod tests {
             .find(|f| f.relpath.ends_with("scripts/parse.bash"))
             .unwrap();
         assert!(bash.contents.contains("module restore default -f"));
+        assert!(bash.contents.contains("python scripts/parse.py"));
         assert!(
-            bash.contents
-                .contains("python \"/r/u/parse/scripts/parse.py\"")
-        );
-        assert!(
-            !bash.contents.contains("python scripts/parse.py"),
-            "H1 regression: parse.py must be launched by absolute path"
+            !bash.contents.contains("python \"/"),
+            "(b) revoke (a): parse.py must be launched by a relative path"
         );
 
         let py = a

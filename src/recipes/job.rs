@@ -37,10 +37,11 @@ pub struct GeneratedFile {
 pub struct JobArtifacts {
     /// flow.toml `[jobs.<id>] program`(論理分類値。`jm ls --program` 用)。
     pub program: String,
-    /// flow.toml `[jobs.<id>] body`。R3'(a・暫定): `bash "<abs job_dir>/scripts/<id>.bash"`
-    /// の絶対パス薄起動子のみ(cd 無し)。SLURM ジョブ cwd は投入 cwd であり
-    /// job dir ではないため、起動・run.py/parse.py の I/O とも絶対パスで cwd
-    /// 非依存。v2 で (b) per-job `cmd.chdir` / (c) `python -m` へ移行し撤回予定。
+    /// flow.toml `[jobs.<id>] body`。R3' + (b): `bash scripts/<id>.bash`
+    /// の薄相対起動子のみ(cd 無し)。SLURM job cwd は `FlowRunner::submit`
+    /// が per-job `SbatchCmd.chdir = Some(<flow_dir>/<job_id>/)` で固定し、
+    /// `scripts/<id>.bash` が解決される。run.py / parse.py 内部は焼込
+    /// 絶対 `JOB_DIR` 定数で I/O 解決し cwd 非依存(R3' 不変)。
     pub body: String,
     /// flow.toml `[jobs.<id>.config] time_limit`。
     pub time_limit: Option<String>,
