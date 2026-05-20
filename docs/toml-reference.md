@@ -148,8 +148,12 @@ launch command, scratch directory, and Gaussian binary — edit `plan.toml` and 
 to update without re-scaffolding.
 
 **`# REPLACE_ME` sentinel.** Lines marked `# REPLACE_ME` in the generated scripts are
-swap-in points for site-specific tooling (e.g. `python -m gaussian_compute_runtime`). The
-scaffolded scripts are self-contained without that tooling.
+swap-in points for site-specific tooling. The scaffolded scripts are self-contained without
+that tooling. As of 2026-05-20 / gaussian-compute-runtime D-α v0.2.0, the only working
+swap-in target is `python -m gaussian_compute_runtime consume-parent-results --config <path>
+<child_uuid_v7>`; the `run-g16` / `parse-results` subcommands are pending B-α migration. See
+`docs/superpowers/specs/2026-05-20-gaussian-compute-runtime-audit.md` (especially §13
+stable-contract) for the canonical current form.
 
 **v1 caveats.**
 
