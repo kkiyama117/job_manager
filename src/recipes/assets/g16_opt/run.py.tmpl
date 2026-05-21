@@ -18,11 +18,13 @@ import shutil
 import subprocess
 import sys
 
-# R3': scaffold (`jm new`) swaps {{JOB_DIR}} for the absolute job dir at
-# generate time. This script never reads the process working directory, so it
-# is immune to SLURM's nondeterministic submit cwd / spool-copy (same property
-# as the reference `run-g16`, which resolves everything from --config/--uuid).
-JOB_DIR = "{{JOB_DIR}}"
+# v2 R4: JM_JOB_DIR is exported by job-manager's batch.bash at render time
+# (resolved from the recipe job dir <flow_dir>/<job_id>/). Reading it from the
+# environment instead of a scaffold-baked absolute constant keeps the script
+# portable when the flow folder is moved and re-rendered. The script never
+# reads the process working directory, so SLURM's nondeterministic submit cwd /
+# spool-copy cannot break it (same cwd-independence as the reference run-g16).
+JOB_DIR = os.environ["JM_JOB_DIR"]
 
 TASK = "main"
 
@@ -32,7 +34,7 @@ def log(msg):
 
 
 def main():
-    job_dir = JOB_DIR  # R3': scaffold-baked absolute path; cwd-independent.
+    job_dir = JOB_DIR  # v2 R4: from $JM_JOB_DIR; cwd-independent.
     g16 = os.environ.get("JM_PARAM_G16_CMD", "g16")
     launcher = os.environ.get("JM_PARAM_LAUNCHER", "")
     flow_uuid = os.environ.get("JM_FLOW_UUID", "noflow")

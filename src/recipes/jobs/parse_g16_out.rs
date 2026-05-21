@@ -3,7 +3,7 @@
 //! scratch_root param 不要。
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::recipes::job::{
     GeneratedFile, JobArtifacts, JobCtx, JobTemplate, PreambleOpts, RecipeError, RecipeParam,
@@ -31,15 +31,6 @@ fn pv<'a>(ctx: &'a JobCtx<'_>, k: &str) -> &'a str {
     ctx.params.get(k).map(|s| s.as_str()).unwrap_or_default()
 }
 
-/// R3': `JOB_DIR = "{{JOB_DIR}}"` の二重引用符内へ差し込む Python 文字列
-/// リテラル内容のエスケープ(周囲の引用符はテンプレ側が持つ)。
-fn py_escape(p: &Path) -> String {
-    p.to_string_lossy()
-        .replace('\\', r"\\")
-        .replace('"', "\\\"")
-        .replace('\n', r"\n")
-}
-
 impl JobTemplate for ParseG16Out {
     fn name(&self) -> &'static str {
         "parse_g16_out"
@@ -62,17 +53,15 @@ impl JobTemplate for ParseG16Out {
             .cloned()
             .unwrap_or_else(|| "../opt/output/main.out".to_string());
 
-        let abs_job_dir = ctx.flow_dir_abs.join(job_id);
+        // v2 R4: parse.py reads `os.environ["JM_JOB_DIR"]`; only the relative
+        // wiring path (INPUT_REL) is swapped at scaffold time. No absolute path
+        // baked, so the flow folder stays portable.
         let parse_py = include_str!("../assets/parse_g16_out/parse.py.tmpl")
-            .replace("{{JOB_DIR}}", &py_escape(&abs_job_dir)) // R3': cwd-independent
             .replace("{{INPUT_REL}}", &input_rel);
 
-        // R3'(a・暫定 — review H1 / 追跡 issue): parse.py を **絶対パス**で
-        // 起動し cwd 非依存にする(cd 無し)。v2 で (b)/(c) へ移行し撤回予定。
-        let parse_py_invocation = format!(
-            "python \"{}\"",
-            abs_job_dir.join("scripts/parse.py").display()
-        );
+        // v2 R4: launch parse.py via the render-time `$JM_JOB_DIR` env var
+        // (bash-expanded at job runtime). cwd-independent, no absolute path baked.
+        let parse_py_invocation = "python \"$JM_JOB_DIR/scripts/parse.py\"".to_string();
         let bash = base_preamble(&PreambleOpts {
             conda_env: pv(ctx, "conda_env"),
             module_block: "module restore default -f",
@@ -102,9 +91,9 @@ impl JobTemplate for ParseG16Out {
             );
         }
 
-        // R3'(a・暫定): body も **絶対パス**の薄起動子(cd 無し)。相対
-        // `bash scripts/...` は SLURM 起動段階で No such file or directory。
-        let body = format!("bash \"{}/scripts/{job_id}.bash\"\n", abs_job_dir.display());
+        // v2 R4: body launches via `$JM_JOB_DIR` (bash-expanded at runtime).
+        // The literal is stored in flow.toml — no absolute path baked.
+        let body = format!("bash \"$JM_JOB_DIR/scripts/{job_id}.bash\"\n");
 
         Ok(JobArtifacts {
             program: "python".to_string(),
@@ -131,7 +120,6 @@ mod tests {
             inputs,
             uuid,
             created_at: "2026-05-18T00:00:00Z",
-            flow_dir_abs: Path::new("/r/u"),
         }
     }
 
@@ -150,12 +138,13 @@ mod tests {
 
         assert_eq!(a.program, "python");
         assert_eq!(a.time_limit.as_deref(), Some("01:00:00"));
-        // R3' (a): body has NO cd AND uses an ABSOLUTE launcher path (H1 fix).
-        assert_eq!(a.body, "bash \"/r/u/parse/scripts/parse.bash\"\n");
-        assert!(!a.body.contains("cd "), "R3': body must not cd");
+        // R4: body has NO cd and launches via the render-time $JM_JOB_DIR env
+        // var — no absolute path baked.
+        assert_eq!(a.body, "bash \"$JM_JOB_DIR/scripts/parse.bash\"\n");
+        assert!(!a.body.contains("cd "), "R4: body must not cd");
         assert!(
-            !a.body.contains("bash scripts/"),
-            "H1 regression: body must not use a relative launcher path"
+            !a.body.contains("/r/u/"),
+            "R4: body must not bake an absolute flow_dir path"
         );
 
         let bash = a
@@ -166,11 +155,7 @@ mod tests {
         assert!(bash.contents.contains("module restore default -f"));
         assert!(
             bash.contents
-                .contains("python \"/r/u/parse/scripts/parse.py\"")
-        );
-        assert!(
-            !bash.contents.contains("python scripts/parse.py"),
-            "H1 regression: parse.py must be launched by absolute path"
+                .contains("python \"$JM_JOB_DIR/scripts/parse.py\"")
         );
 
         let py = a
@@ -179,10 +164,14 @@ mod tests {
             .find(|f| f.relpath.ends_with("scripts/parse.py"))
             .unwrap();
         assert_eq!(py.unix_mode, Some(0o755));
-        // R3': absolute JOB_DIR baked, sentinels swapped, cwd-independent.
-        assert!(py.contents.contains("JOB_DIR = \"/r/u/parse\""));
+        // R4: JOB_DIR read from env, INPUT_REL swapped, no absolute path baked.
+        assert!(py.contents.contains("JOB_DIR = os.environ[\"JM_JOB_DIR\"]"));
         assert!(!py.contents.contains("{{JOB_DIR}}"));
-        assert!(!py.contents.contains("os.getcwd()"), "R3': cwd-independent");
+        assert!(
+            !py.contents.contains("/r/u/"),
+            "R4: no absolute flow_dir path baked into parse.py"
+        );
+        assert!(!py.contents.contains("os.getcwd()"), "R4: cwd-independent");
         assert!(py.contents.contains("../opt/output/main.out"));
         assert!(!py.contents.contains("{{INPUT_REL}}"));
         assert!(py.contents.contains("cclib"));

@@ -23,10 +23,12 @@ import sys
 import tempfile
 
 SCHEMA = "jm-recipe/1"
-# R3': scaffold swaps these at generate time. parse.py never reads
-# the process working directory, so SLURM's nondeterministic submit cwd cannot break it
-# (same cwd-independence as the reference run-g16 / parse-results).
-JOB_DIR = "{{JOB_DIR}}"
+# v2 R4: JM_JOB_DIR is exported by job-manager's batch.bash at render time.
+# Reading it from the environment (not a scaffold-baked constant) keeps parse.py
+# portable across folder moves. INPUT_REL stays a scaffold-time relative wiring
+# path, resolved against JOB_DIR below. parse.py never reads the process working
+# directory, so SLURM's nondeterministic submit cwd cannot break it.
+JOB_DIR = os.environ["JM_JOB_DIR"]
 INPUT_REL = "{{INPUT_REL}}"
 
 
@@ -59,7 +61,7 @@ def main():
     except Exception:
         fail(2, "cclib not importable")
 
-    # R3': resolve the wiring-relative input against the baked absolute
+    # v2 R4: resolve the wiring-relative input against the env-provided
     # JOB_DIR (e.g. <...>/parse + ../opt/output/main.out -> <...>/opt/...).
     src = os.path.normpath(os.path.join(JOB_DIR, INPUT_REL))
     if not os.path.isfile(src):

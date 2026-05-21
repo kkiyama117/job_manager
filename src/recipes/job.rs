@@ -1,7 +1,7 @@
 //! Recipe 二層モデルの型と trait。pyo3 非依存・純粋(I/O なし)。
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// `--param` 値の型タグ。`RecipeParam::default` は常に文字列で持ち、
 /// 検証時にこの型へパースできるかだけを見る。
@@ -37,10 +37,11 @@ pub struct GeneratedFile {
 pub struct JobArtifacts {
     /// flow.toml `[jobs.<id>] program`(論理分類値。`jm ls --program` 用)。
     pub program: String,
-    /// flow.toml `[jobs.<id>] body`。R3'(a・暫定): `bash "<abs job_dir>/scripts/<id>.bash"`
-    /// の絶対パス薄起動子のみ(cd 無し)。SLURM ジョブ cwd は投入 cwd であり
-    /// job dir ではないため、起動・run.py/parse.py の I/O とも絶対パスで cwd
-    /// 非依存。v2 で (b) per-job `cmd.chdir` / (c) `python -m` へ移行し撤回予定。
+    /// flow.toml `[jobs.<id>] body`。v2 R4: `bash "$JM_JOB_DIR/scripts/<id>.bash"`
+    /// の env-var 薄起動子のみ(cd 無し)。`JM_JOB_DIR` は batch.bash が render 時に
+    /// export する絶対パス(`<flow_dir>/<job_id>`)で、bash が job 実行時に展開する。
+    /// scaffold には絶対パスを焼かないため flow folder 移動後も `jm render` 再実行で
+    /// portable(R4 不変条件)。
     pub body: String,
     /// flow.toml `[jobs.<id>.config] time_limit`。
     pub time_limit: Option<String>,
@@ -61,9 +62,6 @@ pub struct JobCtx<'a> {
     pub inputs: &'a BTreeMap<String, String>,
     pub uuid: &'a uuid::Uuid,
     pub created_at: &'a str,
-    /// 絶対 `<root>/<uuid>`。R3' で `flow_dir_abs.join(job_id)` を run.py/parse.py の
-    /// `{{JOB_DIR}}` sentinel へ swap-in する絶対 job dir の親。
-    pub flow_dir_abs: &'a Path,
 }
 
 #[derive(Debug, thiserror::Error)]

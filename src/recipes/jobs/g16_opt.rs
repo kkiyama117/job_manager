@@ -1,7 +1,7 @@
 //! JobTemplate `g16_opt` — g16 構造最適化1ステップ。
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::recipes::job::{
     GeneratedFile, JobArtifacts, JobCtx, JobTemplate, PreambleOpts, RecipeError, RecipeParam,
@@ -102,16 +102,6 @@ fn pv<'a>(ctx: &'a JobCtx<'_>, k: &str) -> &'a str {
     ctx.params.get(k).map(|s| s.as_str()).unwrap_or_default()
 }
 
-/// R3': `JOB_DIR = "{{JOB_DIR}}"` の二重引用符内へ差し込む Python 文字列リテラル
-/// 内容のエスケープ(`\` と `"` のみ。POSIX パスに改行はまず無いが念のため `\n` も)。
-/// 周囲の引用符はテンプレ側 (`"{{JOB_DIR}}"`) が持つ。
-fn py_escape(p: &Path) -> String {
-    p.to_string_lossy()
-        .replace('\\', r"\\")
-        .replace('"', "\\\"")
-        .replace('\n', r"\n")
-}
-
 /// param 値を宣言型に応じた `toml::Value` へ(検証は assemble 済み前提。
 /// パース失敗時は文字列フォールバックで panic しない)。
 fn typed_toml(ty: RecipeParamType, v: &str) -> toml::Value {
@@ -170,19 +160,16 @@ impl JobTemplate for G16Opt {
             .replace("{{GEOMETRY_BLOCK}}", &geometry_block)
             .replace("{{EXTRA_INPUT}}", pv(ctx, "extra_input"));
 
-        let abs_job_dir = ctx.flow_dir_abs.join(job_id);
-        let run_py = include_str!("../assets/g16_opt/run.py.tmpl")
-            .replace("{{JOB_DIR}}", &py_escape(&abs_job_dir)); // R3': cwd-independent
+        // v2 R4: run.py reads `os.environ["JM_JOB_DIR"]` (exported by
+        // batch.bash at render time) — no scaffold-baked absolute path, so the
+        // template is embedded verbatim and the flow folder stays portable.
+        let run_py = include_str!("../assets/g16_opt/run.py.tmpl").to_string();
 
         let module_block = format!("module restore {} -f", pv(ctx, "module_profile"));
-        // R3'(a・暫定 — review H1 / 追跡 issue): SLURM ジョブ cwd は
-        // `jm submit` 投入 cwd であって job dir ではない。run.py を **絶対
-        // パス**で起動して cwd 非依存にする(cd 無し)。v2 で (b) per-job
-        // cmd.chdir / (c) `python -m` へ移行し、この絶対化は撤回予定。
-        let run_py_invocation = format!(
-            "python \"{}\"",
-            abs_job_dir.join("scripts/run.py").display()
-        );
+        // v2 R4: launch run.py via the render-time `$JM_JOB_DIR` env var (bash
+        // expands it at job runtime to the re-rendered absolute path). cwd-
+        // independent without baking any absolute path into the scaffold.
+        let run_py_invocation = "python \"$JM_JOB_DIR/scripts/run.py\"".to_string();
         let bash = base_preamble(&PreambleOpts {
             conda_env: pv(ctx, "conda_env"),
             module_block: &module_block,
@@ -217,9 +204,10 @@ impl JobTemplate for G16Opt {
             plan_params.insert(rp.name.to_string(), typed_toml(rp.ty, pv(ctx, rp.name)));
         }
 
-        // R3'(a・暫定): body も **絶対パス**の薄起動子(cd 無し)。相対
-        // `bash scripts/...` は SLURM 起動段階で No such file or directory。
-        let body = format!("bash \"{}/scripts/{job_id}.bash\"\n", abs_job_dir.display());
+        // v2 R4: body launches via `$JM_JOB_DIR` (bash-expanded at job
+        // runtime). The literal `$JM_JOB_DIR` is stored in flow.toml (no
+        // absolute path baked), satisfying the R4 portability invariant.
+        let body = format!("bash \"$JM_JOB_DIR/scripts/{job_id}.bash\"\n");
 
         Ok(JobArtifacts {
             program: "g16".to_string(),
@@ -239,7 +227,6 @@ mod tests {
         params: &'a BTreeMap<String, String>,
         inputs: &'a BTreeMap<String, String>,
         uuid: &'a uuid::Uuid,
-        flow_dir: &'a Path,
     ) -> JobCtx<'a> {
         JobCtx {
             job_id: "opt",
@@ -247,7 +234,6 @@ mod tests {
             inputs,
             uuid,
             created_at: "2026-05-18T00:00:00Z",
-            flow_dir_abs: flow_dir,
         }
     }
 
@@ -259,27 +245,23 @@ mod tests {
     }
 
     #[test]
-    fn instantiate_emits_r3prime_body_and_sidecars() {
+    fn instantiate_emits_r4_body_and_sidecars() {
         let params = default_params();
         let inputs = BTreeMap::new();
         let uuid = uuid::Uuid::now_v7();
-        let flow_dir = Path::new("/work/root/01999999-0000-7000-8000-000000000000");
         let a = G16Opt
-            .instantiate(&ctx_with(&params, &inputs, &uuid, flow_dir))
+            .instantiate(&ctx_with(&params, &inputs, &uuid))
             .unwrap();
 
         assert_eq!(a.program, "g16");
         assert_eq!(a.time_limit.as_deref(), Some("48:00:00"));
-        // R3' (a): body has NO cd AND uses an ABSOLUTE launcher path
-        // (cwd-independent under SLURM — H1 fix).
-        assert_eq!(
-            a.body,
-            "bash \"/work/root/01999999-0000-7000-8000-000000000000/opt/scripts/opt.bash\"\n"
-        );
-        assert!(!a.body.contains("cd "), "R3': body must not cd");
+        // R4: body has NO cd and launches via the render-time $JM_JOB_DIR env
+        // var — no absolute path baked into the scaffold (folder-portable).
+        assert_eq!(a.body, "bash \"$JM_JOB_DIR/scripts/opt.bash\"\n");
+        assert!(!a.body.contains("cd "), "R4: body must not cd");
         assert!(
-            !a.body.contains("bash scripts/"),
-            "H1 regression: body must not use a relative launcher path"
+            !a.body.contains("/work/root/"),
+            "R4: body must not bake an absolute flow_dir path"
         );
 
         let bash = a
@@ -290,12 +272,9 @@ mod tests {
         assert_eq!(bash.unix_mode, Some(0o755));
         assert!(bash.contents.contains("module restore gaussian_A -f"));
         assert!(bash.contents.contains("conda activate analysis"));
-        assert!(bash.contents.contains(
-            "python \"/work/root/01999999-0000-7000-8000-000000000000/opt/scripts/run.py\""
-        ));
         assert!(
-            !bash.contents.contains("python scripts/run.py"),
-            "H1 regression: run.py must be launched by absolute path"
+            bash.contents
+                .contains("python \"$JM_JOB_DIR/scripts/run.py\"")
         );
         assert!(!bash.contents.contains("srun"), "srun lives in run.py");
 
@@ -305,20 +284,24 @@ mod tests {
             .find(|f| f.relpath.ends_with("scripts/run.py"))
             .unwrap();
         assert_eq!(runpy.unix_mode, Some(0o755));
-        // R3': absolute JOB_DIR baked in, no {{JOB_DIR}} sentinel left,
-        // os.getcwd() never used (cwd-independent like the reference run-g16).
+        // R4: JOB_DIR is read from the environment, no {{JOB_DIR}} sentinel
+        // and no absolute path baked, os.getcwd() never used.
         assert!(
             runpy
                 .contents
-                .contains("JOB_DIR = \"/work/root/01999999-0000-7000-8000-000000000000/opt\"")
+                .contains("JOB_DIR = os.environ[\"JM_JOB_DIR\"]")
         );
         assert!(
             !runpy.contents.contains("{{JOB_DIR}}"),
-            "sentinel must be swapped"
+            "sentinel must be gone"
+        );
+        assert!(
+            !runpy.contents.contains("/work/root/"),
+            "R4: no absolute flow_dir path baked into run.py"
         );
         assert!(
             !runpy.contents.contains("os.getcwd()"),
-            "R3': cwd-independent"
+            "R4: cwd-independent"
         );
         assert!(runpy.contents.contains("subprocess.run(argv, cwd=scratch)"));
         assert!(runpy.contents.contains("finally:"));
@@ -351,7 +334,7 @@ mod tests {
         let inputs = BTreeMap::new();
         let uuid = uuid::Uuid::now_v7();
         let a = G16Opt
-            .instantiate(&ctx_with(&params, &inputs, &uuid, Path::new("/r/u")))
+            .instantiate(&ctx_with(&params, &inputs, &uuid))
             .unwrap();
         let gjf = a
             .sidecars
@@ -369,7 +352,7 @@ mod tests {
         let inputs = BTreeMap::new();
         let uuid = uuid::Uuid::now_v7();
         let err = G16Opt
-            .instantiate(&ctx_with(&params, &inputs, &uuid, Path::new("/r/u")))
+            .instantiate(&ctx_with(&params, &inputs, &uuid))
             .unwrap_err();
         assert!(matches!(err, RecipeError::InputCoordinateMissing(_)));
     }
@@ -380,7 +363,7 @@ mod tests {
         let inputs = BTreeMap::new();
         let uuid = uuid::Uuid::now_v7();
         let a = G16Opt
-            .instantiate(&ctx_with(&params, &inputs, &uuid, Path::new("/r/u")))
+            .instantiate(&ctx_with(&params, &inputs, &uuid))
             .unwrap();
         assert!(!a.plan_params.contains_key("input_coordinate"));
         assert_eq!(a.plan_params.get("charge"), Some(&toml::Value::Integer(0)));
