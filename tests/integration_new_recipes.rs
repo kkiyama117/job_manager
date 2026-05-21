@@ -116,6 +116,25 @@ fn scaffold_g16_opt_parse_writes_all_files() {
     assert!(parsepy.contains("JOB_DIR = os.environ[\"JM_JOB_DIR\"]"));
     assert!(!parsepy.contains("{{JOB_DIR}}"));
 
+    // stage 2b: per-task common.toml carries the site config (read by run.py).
+    let optcommon = fs::read_to_string(dir.join("opt/common.toml")).unwrap();
+    assert!(optcommon.contains("launcher       = \"srun\""));
+    assert!(optcommon.contains("g16_cmd        = \"g16\""));
+    assert!(optcommon.contains("module_profile = \"gaussian_A\""));
+    assert!(
+        !optcommon.contains(&dir.display().to_string()),
+        "R4: common.toml must not bake an absolute flow_dir path"
+    );
+    let parsecommon = fs::read_to_string(dir.join("parse/common.toml")).unwrap();
+    assert!(parsecommon.contains("module_profile = \"default\""));
+    // stage 2b: site config left plan.toml.
+    let plan = fs::read_to_string(dir.join("plan.toml")).unwrap();
+    assert!(
+        !plan.contains("launcher"),
+        "plan.toml must not carry launcher"
+    );
+    assert!(plan.contains("route"), "plan.toml keeps experiment params");
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -160,8 +179,10 @@ fn r4_scaffold_bakes_no_absolute_flow_dir_path() {
         "plan.toml",
         "opt/scripts/opt.bash",
         "opt/scripts/run.py",
+        "opt/common.toml",
         "parse/scripts/parse.bash",
         "parse/scripts/parse.py",
+        "parse/common.toml",
     ] {
         let body = fs::read_to_string(abs_dir.join(rel)).unwrap();
         assert!(
@@ -205,7 +226,7 @@ fn missing_input_coordinate_fails_and_rolls_back() {
 }
 
 #[test]
-fn scaffold_then_render_succeeds_and_bakes_jm_params() {
+fn scaffold_then_render_succeeds_and_injects_jm_job_dir() {
     let root = tempfile::tempdir().unwrap();
     let dir = scaffold_print_path(&root, &["g16-opt-parse"]);
     let uuid = dir.file_name().unwrap().to_string_lossy().into_owned();
@@ -219,15 +240,24 @@ fn scaffold_then_render_succeeds_and_bakes_jm_params() {
         .assert()
         .success();
 
+    // stage 2b: launcher/g16_cmd left plan.toml for common.toml, so render no
+    // longer bakes JM_PARAM_LAUNCHER. Instead it injects the R4 path env.
     let mut files = Vec::new();
     walk(&dir, &mut files);
-    let baked = files.iter().any(|p| {
-        p.ends_with("batch.bash")
-            && fs::read_to_string(p)
-                .map(|s| s.contains("export JM_PARAM_LAUNCHER='srun'"))
-                .unwrap_or(false)
-    });
-    assert!(baked, "render must bake export JM_PARAM_LAUNCHER='srun'");
+    let batches: Vec<String> = files
+        .iter()
+        .filter(|p| p.ends_with("batch.bash"))
+        .filter_map(|p| fs::read_to_string(p).ok())
+        .collect();
+    assert!(!batches.is_empty(), "render must produce batch.bash files");
+    assert!(
+        batches.iter().any(|s| s.contains("export JM_JOB_DIR=")),
+        "render must inject export JM_JOB_DIR (R4)"
+    );
+    assert!(
+        batches.iter().all(|s| !s.contains("JM_PARAM_LAUNCHER")),
+        "stage 2b: launcher moved to common.toml; must not bake JM_PARAM_LAUNCHER"
+    );
 }
 
 #[test]

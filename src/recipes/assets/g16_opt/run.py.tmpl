@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib  # py3.11+
 
 # v2 R4: JM_JOB_DIR is exported by job-manager's batch.bash at render time
 # (resolved from the recipe job dir <flow_dir>/<job_id>/). Reading it from the
@@ -35,13 +36,14 @@ def log(msg):
 
 def main():
     job_dir = JOB_DIR  # v2 R4: from $JM_JOB_DIR; cwd-independent.
-    g16 = os.environ.get("JM_PARAM_G16_CMD", "g16")
-    launcher = os.environ.get("JM_PARAM_LAUNCHER", "")
+    # v2 stage 2b: site config comes from <job_dir>/common.toml (NOT JM_PARAM_*).
+    with open(os.path.join(job_dir, "common.toml"), "rb") as fh:
+        cfg = tomllib.load(fh)
+    g16 = cfg.get("g16_cmd") or "g16"
+    launcher = cfg.get("launcher", "")
     flow_uuid = os.environ.get("JM_FLOW_UUID", "noflow")
     job_id = os.environ.get("JM_JOB_ID", "nojob")
-    scratch_root = os.environ.get("JM_PARAM_SCRATCH_ROOT", "") or os.path.join(
-        job_dir, ".scratch"
-    )
+    scratch_root = cfg.get("scratch_root") or os.path.join(job_dir, ".scratch")
     scratch = os.path.join(scratch_root, flow_uuid, job_id)
 
     in_dir = os.path.join(job_dir, "input")

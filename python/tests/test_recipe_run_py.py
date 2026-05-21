@@ -7,6 +7,21 @@ REPO = Path(__file__).resolve().parents[2]
 RUN_TMPL = REPO / "src/recipes/assets/g16_opt/run.py.tmpl"
 
 
+def _write_common(
+    job: Path, *, launcher: str = "", g16_cmd: str = "g16", scratch_root: str = ""
+) -> None:
+    # v2 stage 2b: run.py reads site config from <job_dir>/common.toml.
+    job.mkdir(parents=True, exist_ok=True)
+    (job / "common.toml").write_text(
+        f'launcher = "{launcher}"\n'
+        f'g16_cmd = "{g16_cmd}"\n'
+        f'scratch_root = "{scratch_root}"\n'
+        'conda_env = "analysis"\n'
+        'module_profile = "gaussian_A"\n'
+        'pixi_manifest = ""\n'
+    )
+
+
 def _materialize(tmp: Path) -> Path:
     job = tmp / "job"
     (job / "input").mkdir(parents=True)
@@ -18,6 +33,8 @@ def _materialize(tmp: Path) -> Path:
     # v2 R4: run.py reads JOB_DIR from $JM_JOB_DIR (no scaffold-baked path),
     # so the template is written verbatim; base_env() exports JM_JOB_DIR.
     (scripts / "run.py").write_text(RUN_TMPL.read_text())
+    # v2 stage 2b: default common.toml (tests override as needed).
+    _write_common(job, scratch_root=str(tmp / "scratch"))
     return job
 
 
@@ -48,11 +65,9 @@ def base_env(tmp: Path) -> dict:
     e["JM_FLOW_UUID"] = "flowu"
     e["JM_JOB_ID"] = "opt"
     # v2 R4: run.py resolves JOB_DIR from JM_JOB_DIR (exported by batch.bash
-    # at render time). _materialize() puts the job at tmp/job.
+    # at render time). _materialize() puts the job at tmp/job. Site config
+    # (launcher/g16_cmd/scratch_root) now comes from common.toml, not env.
     e["JM_JOB_DIR"] = str(tmp / "job")
-    e["JM_PARAM_SCRATCH_ROOT"] = str(tmp / "scratch")
-    e["JM_PARAM_LAUNCHER"] = ""
-    e["JM_PARAM_G16_CMD"] = "g16"
     return e
 
 
@@ -74,15 +89,17 @@ def test_g16_nonzero_propagates_and_still_copies(tmp_path):
 
 def test_missing_g16_does_not_exit_zero(tmp_path):
     job = _materialize(tmp_path)
-    env = base_env(tmp_path)
-    env["JM_PARAM_G16_CMD"] = "definitely-not-on-path-xyz"
-    cp = _run(job, env)
+    _write_common(
+        job, g16_cmd="definitely-not-on-path-xyz", scratch_root=str(tmp_path / "scratch")
+    )
+    cp = _run(job, base_env(tmp_path))
     assert cp.returncode != 0
     assert "failed to launch" in cp.stderr
 
 
 def test_launcher_prefixes_argv(tmp_path):
     job = _materialize(tmp_path)
+    _write_common(job, launcher="srun", scratch_root=str(tmp_path / "scratch"))
     _stub_bin(
         tmp_path,
         "srun",
@@ -90,7 +107,6 @@ def test_launcher_prefixes_argv(tmp_path):
     )
     _stub_bin(tmp_path, "g16", "exit 0\n")
     env = base_env(tmp_path)
-    env["JM_PARAM_LAUNCHER"] = "srun"
     env["SRUN_ARGS_FILE"] = str(tmp_path / "srun_args.txt")
     cp = _run(job, env)
     assert cp.returncode == 0, cp.stderr
@@ -99,9 +115,8 @@ def test_launcher_prefixes_argv(tmp_path):
 
 def test_scratch_root_empty_falls_back_to_dot_scratch(tmp_path):
     job = _materialize(tmp_path)
+    _write_common(job, scratch_root="")  # empty → $JM_JOB_DIR/.scratch fallback
     _stub_bin(tmp_path, "g16", "echo ok > main.out\nexit 0\n")
-    env = base_env(tmp_path)
-    env["JM_PARAM_SCRATCH_ROOT"] = ""
-    cp = _run(job, env)
+    cp = _run(job, base_env(tmp_path))
     assert cp.returncode == 0, cp.stderr
     assert (job / ".scratch" / "flowu" / "opt" / "main.out").exists()
