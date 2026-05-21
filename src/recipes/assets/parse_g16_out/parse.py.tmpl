@@ -12,8 +12,10 @@
 #   python -m gaussian_compute_runtime parse-results --config <runtime common.toml>
 # Schema caveat: this script writes the flat `jm-recipe/1` result.json
 # (5 fields), while runtime parse-results emits the nested `GaussianResult`
-# shape (cclib-derived). Aligning the two schemas is tracked separately
-# (audit §10 gap matrix / issue #36).
+# shape (cclib-derived) — which notably omits the final SCF energy. The two
+# are intentionally NOT interchangeable; this divergence is accepted (not a
+# bug). See docs/superpowers/specs/2026-05-20-gaussian-compute-runtime-
+# audit.md §17 for the field-level comparison and the re-evaluation trigger.
 import json
 import math
 import os
