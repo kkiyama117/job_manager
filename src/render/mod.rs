@@ -3,6 +3,7 @@
 use crate::jobid::JobIdParts;
 use gaussian_job_shared::entities::workflow::JobId;
 use std::collections::BTreeMap;
+use std::path::Path;
 use uuid::Uuid;
 
 /// Convert an axis name or param key into a bash-safe upper-case identifier.
@@ -32,7 +33,16 @@ pub fn quote_for_bash(value: &str) -> String {
 /// - Job context: `JM_FLOW_UUID`, `JM_JOB_ID`
 /// - Axes: `JM_AXIS_<NAME>` for each (axis, idx) in axis_combo
 /// - Params: `JM_PARAM_<NAME>` for each (k, v) in params
+/// - Dynamic path env: `JM_FLOW_DIR`, `JM_JOB_DIR` (v2 R4 — resolved at
+///   render time so a moved flow_dir becomes portable after re-render)
 /// - User body (JobSpec.body)
+///
+/// `abs_flow_dir` is the absolute flow directory (`<root>/<flow_uuid>`) and
+/// `abs_job_dir` is the absolute recipe job directory (`<flow_dir>/<job_id>`,
+/// where `scripts/`, `input/`, and per-task `common.toml` live — NOT the
+/// program-managed `.jm/<JobId>/` area). Scripts read `$JM_JOB_DIR` instead
+/// of a scaffold-baked absolute constant, so moving the folder and re-running
+/// `jm render` re-bakes the new absolute paths.
 ///
 /// All values are quoted with `quote_for_bash` for POSIX safety.
 pub fn render_batch_bash(
@@ -41,6 +51,8 @@ pub fn render_batch_bash(
     parts: &JobIdParts<'_>,
     params: &BTreeMap<String, toml::Value>,
     body: &str,
+    abs_flow_dir: &Path,
+    abs_job_dir: &Path,
 ) -> String {
     let mut s = String::new();
     s.push_str("#!/bin/bash\n");
@@ -69,6 +81,15 @@ pub fn render_batch_bash(
             quote_for_bash(&val)
         ));
     }
+    s.push_str("\n# --- v2 job-manager dynamic path env (resolved at render time) ---\n");
+    s.push_str(&format!(
+        "export JM_FLOW_DIR={}\n",
+        quote_for_bash(&abs_flow_dir.to_string_lossy())
+    ));
+    s.push_str(&format!(
+        "export JM_JOB_DIR={}\n",
+        quote_for_bash(&abs_job_dir.to_string_lossy())
+    ));
     s.push_str("\n# --- user body (JobSpec.body) ---\n");
     s.push_str(body);
     if !body.ends_with('\n') {
@@ -148,7 +169,17 @@ mod tests {
         params.insert("nproc".to_string(), toml::Value::Integer(16));
         let body = "#!/bin/bash\necho hello";
 
-        let out = render_batch_bash(&flow_uuid, &jid, &parts, &params, body);
+        let abs_flow_dir = Path::new("/work/root/01997cdc-0000-7000-8000-000000000000");
+        let abs_job_dir = abs_flow_dir.join("opt");
+        let out = render_batch_bash(
+            &flow_uuid,
+            &jid,
+            &parts,
+            &params,
+            body,
+            abs_flow_dir,
+            &abs_job_dir,
+        );
 
         assert!(out.starts_with("#!/bin/bash"));
         assert!(out.contains("export JM_FLOW_UUID='01997cdc-0000-7000-8000-000000000000'"));
@@ -157,7 +188,18 @@ mod tests {
         assert!(out.contains("export JM_AXIS_METHOD='1'"));
         assert!(out.contains("export JM_PARAM_ROUTE='# B3LYP/6-31G*'"));
         assert!(out.contains("export JM_PARAM_NPROC='16'"));
+        assert!(
+            out.contains("export JM_FLOW_DIR='/work/root/01997cdc-0000-7000-8000-000000000000'")
+        );
+        assert!(
+            out.contains("export JM_JOB_DIR='/work/root/01997cdc-0000-7000-8000-000000000000/opt'")
+        );
         assert!(out.contains(body));
+
+        // JM_JOB_DIR / JM_FLOW_DIR must be emitted before the user body.
+        let body_pos = out.find("# --- user body").unwrap();
+        let job_dir_pos = out.find("export JM_JOB_DIR").unwrap();
+        assert!(job_dir_pos < body_pos, "path env must precede user body");
     }
 
     #[test]
@@ -179,9 +221,54 @@ mod tests {
             toml::Value::String("it's working".to_string()),
         );
 
-        let out = render_batch_bash(&flow_uuid, &jid, &parts, &params, "");
+        let abs_flow_dir = Path::new("/r/01997cdc-0000-7000-8000-000000000000");
+        let abs_job_dir = abs_flow_dir.join("x");
+        let out = render_batch_bash(
+            &flow_uuid,
+            &jid,
+            &parts,
+            &params,
+            "",
+            abs_flow_dir,
+            &abs_job_dir,
+        );
         assert!(
             out.contains(r"export JM_PARAM_NOTE='it'\''s working'"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn render_batch_bash_quotes_path_with_single_quote() {
+        use crate::jobid::JobIdParts;
+        use gaussian_job_shared::entities::workflow::JobId;
+        use std::collections::BTreeMap;
+        use uuid::Uuid;
+
+        let flow_uuid = Uuid::parse_str("01997cdc-0000-7000-8000-000000000000").unwrap();
+        let jid = JobId("opt".to_string());
+        let parts = JobIdParts {
+            source_step_id: "opt",
+            axis_combo: vec![],
+        };
+        let params: BTreeMap<String, toml::Value> = BTreeMap::new();
+
+        // A flow_dir containing a single quote must stay POSIX-safe.
+        let abs_flow_dir = Path::new("/work/o'brien/01997cdc-0000-7000-8000-000000000000");
+        let abs_job_dir = abs_flow_dir.join("opt");
+        let out = render_batch_bash(
+            &flow_uuid,
+            &jid,
+            &parts,
+            &params,
+            "",
+            abs_flow_dir,
+            &abs_job_dir,
+        );
+        assert!(
+            out.contains(
+                r"export JM_FLOW_DIR='/work/o'\''brien/01997cdc-0000-7000-8000-000000000000'"
+            ),
             "got: {out}"
         );
     }

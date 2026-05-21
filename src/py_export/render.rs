@@ -22,6 +22,8 @@ pub fn render_batch_bash(
     job_id: &str,
     body: &str,
     params: BTreeMap<String, String>,
+    abs_flow_dir: &str,
+    abs_job_dir: &str,
 ) -> PyResult<String> {
     let flow_uuid = uuid::Uuid::parse_str(flow_uuid)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
@@ -32,5 +34,13 @@ pub fn render_batch_bash(
         .into_iter()
         .map(|(k, v)| (k, toml::Value::String(v)))
         .collect();
-    Ok(inner(&flow_uuid, &jid, &parts, &params_toml, body))
+    Ok(inner(
+        &flow_uuid,
+        &jid,
+        &parts,
+        &params_toml,
+        body,
+        std::path::Path::new(abs_flow_dir),
+        std::path::Path::new(abs_job_dir),
+    ))
 }

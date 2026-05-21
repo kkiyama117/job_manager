@@ -93,14 +93,16 @@ mod job_manager_core {
     // SP-3 G.1: render / submit / persistence
     #[pyo3_stub_gen::derive::gen_stub_pyfunction()]
     #[pyfunction]
-    #[pyo3(signature = (flow_uuid, job_id, body, params))]
+    #[pyo3(signature = (flow_uuid, job_id, body, params, abs_flow_dir, abs_job_dir))]
     fn render_batch_bash(
         flow_uuid: &str,
         job_id: &str,
         body: &str,
         params: std::collections::BTreeMap<String, String>,
+        abs_flow_dir: &str,
+        abs_job_dir: &str,
     ) -> PyResult<String> {
-        super::render::render_batch_bash(flow_uuid, job_id, body, params)
+        super::render::render_batch_bash(flow_uuid, job_id, body, params, abs_flow_dir, abs_job_dir)
     }
 
     /// Submit a flow. Awaits to a `dict[JobId, slurm_jobid]` for the
