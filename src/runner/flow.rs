@@ -241,8 +241,21 @@ impl<'r> FlowRunner<'r> {
                     flow: fr.flow_uuid,
                     job: jid.clone(),
                 })?;
-            let script_content =
-                render_batch_bash(&fr.flow_uuid, jid, &parts, params, &job.spec.body);
+            // v2 R4: JM_FLOW_DIR / JM_JOB_DIR are resolved at render time from
+            // the recipe directory layout (`<flow_dir>/<job_id>/`), not the
+            // program-managed `.jm/<JobId>/` area, so scripts can read
+            // `$JM_JOB_DIR` instead of a scaffold-baked absolute constant.
+            let abs_flow_dir = self.resolver.flow_dir(&fr.flow_uuid);
+            let abs_job_dir = abs_flow_dir.join(&jid.0);
+            let script_content = render_batch_bash(
+                &fr.flow_uuid,
+                jid,
+                &parts,
+                params,
+                &job.spec.body,
+                &abs_flow_dir,
+                &abs_job_dir,
+            );
 
             let batch_path = self.resolver.batch_bash(&fr.flow_uuid, jid);
             if let Some(parent) = batch_path.parent() {

@@ -170,6 +170,8 @@ def render_batch_bash(
     job_id: builtins.str,
     body: builtins.str,
     params: typing.Mapping[builtins.str, builtins.str],
+    abs_flow_dir: builtins.str,
+    abs_job_dir: builtins.str,
 ) -> builtins.str: ...
 async def submit_flow(
     root: builtins.str | os.PathLike | pathlib.Path,
