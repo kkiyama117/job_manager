@@ -1,5 +1,20 @@
 # jm new g16-opt-parse レシピ(案A v1)Implementation Plan
 
+> **Status (2026-05-20):** Historical(全 16 タスク完了 = PR #27 + PR #28 merged、
+> (a) interim 確定)。本 plan は **2026-05-18 時点の実装 plan** をそのまま保存している
+> historical record。embed された `run.py` / `parse.py` template 抜粋(L657/L662 /
+> L1121/L1126 周辺)は作成時点の `gaussian_compute_runtime` swap-in 例
+> (`python -m gaussian_compute_runtime <step> --config <abs gem toml>` 等)を含むが、
+> 実 CLI 形とは drift がある。**現行の真値**は次を参照(issue #34 cross-ref):
+> - **Runtime CLI 実形 / 安定契約**: `docs/superpowers/specs/2026-05-20-gaussian-compute-runtime-audit.md`
+>   (PR #37 merged) — `run-g16` / `parse-results` は D-α v0.2.0 で BROKEN(B-α migration 待ち)、
+>   γ(`consume-parent-results`)のみ swap-in 可。実フラグは `--config <path>`。
+> - **現行 recipes の `# REPLACE_ME` コメント**: `src/recipes/assets/{g16_opt,parse_g16_out}/`
+>   (PR #38 merged で audit §13 整合済) — plan embed snippet の現在形。
+> - **v2 設計差分(R3' → R4)**: `docs/superpowers/specs/2026-05-20-jm-recipe-v2-design.md`(PR #31 merged)。
+>
+> plan body は**書き換えない**(historical preservation)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** `jm new g16-opt-parse` 一発で、kudpc で「g16 構造最適化 →afterok→ 結果検証」を回す編集可能・自己完結な job-manager flow 一式(flow.toml/plan.toml + `scripts/*.bash`/`run.py`/`parse.py` + `input/main.gjf`)を生成する。

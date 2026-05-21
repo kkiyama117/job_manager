@@ -1,7 +1,28 @@
 # `jm new g16-opt-parse` — kudpc 向け g16 構造最適化レシピ — design (独立案A)
 
 **Date:** 2026-05-18
-**Status:** Draft (awaiting user review)
+**Status:** Historical(land 済 PR #27/#28、(a) interim 確定 PR #28)
+**Status (original):** Draft (awaiting user review)
+
+> **Historical note(2026-05-20 audit cross-ref、issue #34):**
+> 本ドキュメントは **2026-05-18 時点の v1 設計** をそのまま保存している historical
+> record で、`gaussian_compute_runtime` の `# REPLACE_ME` swap-in 例
+> (例: `python -m gaussian_compute_runtime <step> --config <per-task common.toml>
+> --uuid <uuid>`)は **作成時点のプレースホルダ表記**であり、実 CLI 形とは
+> drift がある。**現行の真値**は次を参照:
+> - **Runtime CLI 実形 / 安定契約**: `docs/superpowers/specs/2026-05-20-gaussian-compute-runtime-audit.md`
+>   (PR #37 merged) — 特に §4 / §6(`common.toml` schema)/ §11(shape drift 表)
+>   / §13(stable-contract one-liner)。`run-g16` / `parse-results` は D-α v0.2.0
+>   で BROKEN(B-α migration 待ち)、γ(`consume-parent-results`)のみ swap-in 可。
+>   実フラグは `--config <path>`(`--common` / `--uuid` / `--job-id` は不存在)。
+> - **v2 設計と命名衝突注記**: `docs/superpowers/specs/2026-05-20-jm-recipe-v2-design.md`
+>   (PR #31 merged) — v2 per-task `common.toml`(jm site config)と runtime
+>   `--config` schema は **別ファイル / 別 schema**(§4.3 参照)。
+> - **現行 recipes の `# REPLACE_ME` コメント**: `src/recipes/assets/{g16_opt,parse_g16_out}/`
+>   (PR #38 merged で audit §13 整合済)。
+>
+> v1 body は**書き換えない**(historical preservation)。今後の読者は
+> 本 note と上記 3 文書を併読すること。
 **関係性:** これは `2026-05-16-jm-new-domain-recipes-design.md`(rev.7)とは**独立に組んだ並行設計(案A)**。
 ユーザが後段で rev.7 と手動マージする前提。rev.7 との意図的な分岐点は **§4.2 / §11**
 (launcher・scratch_root の D2 協調PR を v1 から外し v2 拡張点に切り出す)。
