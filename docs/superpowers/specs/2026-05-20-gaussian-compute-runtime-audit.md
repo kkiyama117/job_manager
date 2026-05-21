@@ -522,3 +522,98 @@ Linked job-manager design docs:
 - Issues #33, #34, #35, #36 can be unblocked and start citing §10 (gap
   matrix), §11 (CLI drift), §12 (stability matrix), §13 (stable-contract
   one-liner).
+
+## 17. `result.json` schema divergence — issue #36 resolution
+
+> Added 2026-05-21 as the documented-divergence deliverable for issue #36
+> ("verify v1 self-contained outputs match current runtime"). Issue #36's
+> "Done when" allows *either* an alignment PR *or* a documented divergence
+> statement landing in this audit doc. This section is that statement.
+
+### 17.1 Why a static comparison (no live diff)
+
+Issue #36's task list asks for a live `run.py` vs `python -m
+gaussian_compute_runtime run-g16` diff. **That is not runnable today**:
+`run-g16` and `parse-results` both raise `ImportError` under D-α v0.2.0
+(§4.1 / §4.2 — `ConfigManager` / `JobPaths` removed). So this resolution
+is a **source-level** comparison of the two `result.json` shapes, not a
+runtime diff.
+
+### 17.2 The two schemas, side by side
+
+**v1 self-contained** (`src/recipes/assets/parse_g16_out/parse.py.tmpl`,
+written to `<job_dir>/output/result.json`):
+
+```json
+{
+  "schema": "jm-recipe/1",
+  "converged": true,
+  "scf_energy": -76.41980012,
+  "n_atoms": 3,
+  "source": "/abs/.../opt/output/main.out"
+}
+```
+
+**Runtime** (`gaussian_job_results.serializer.write_json` →
+`GaussianResult` with `raw` stripped, written to
+`<target_dir>/result.json`; keys alphabetized by `sort_keys=True`):
+
+```json
+{
+  "run_info": {
+    "charge": 0,
+    "gbasis": null,
+    "metadata": { "package": "Gaussian", "success": true, "...": "full cclib data.metadata verbatim" },
+    "mult": 1,
+    "natom": 3,
+    "optdone": true,
+    "pressure": null,
+    "scannames": null,
+    "source_path": "/abs/.../main.out",
+    "temperature": null
+  }
+}
+```
+
+### 17.3 Field-level divergence
+
+| Concept | v1 `jm-recipe/1` | Runtime `GaussianResult` | Interchangeable? |
+|---|---|---|---|
+| Versioning | `schema: "jm-recipe/1"` tag | **no version/schema tag at all** | No — runtime consumers can't version-detect. |
+| Nesting | flat top-level | nested under `run_info` | No. |
+| Convergence | `converged` (bool) | `run_info.optdone` (bool) | Semantically equal, renamed. |
+| Atom count | `n_atoms` (int) | `run_info.natom` (int) | Semantically equal, renamed. |
+| Source path | `source` (abs) | `run_info.source_path` (str) | Semantically equal, renamed. |
+| **Final energy** | `scf_energy` (float) | **absent** | **No — the runtime JSON omits the final energy entirely.** Computed quantities live on the in-memory `raw` ccData, which `serializer._to_serializable` strips before encoding (`payload.pop("raw")`). |
+| Extra metadata | none | `metadata` dict + `charge` / `mult` / `gbasis` / `scannames` / `temperature` / `pressure` | Runtime is a superset *except* for energy. |
+
+### 17.4 Verdict + decision
+
+**Not interchangeable.** The most load-bearing field for v1's purpose —
+`scf_energy`, the number the `parse → afterok` gate is curated around — is
+**not present** in the runtime's `result.json` (it only survives on the
+stripped `raw` object). Beyond that, the two differ in versioning,
+nesting, field names, and file location (§10 row "`result.json`
+location").
+
+**Decision: accept the divergence (issue #36 option 2).** Do **not**
+align the v1 scripts to the runtime schema, because:
+
+1. **Broken target.** `parse-results` does not run under D-α v0.2.0; there
+   is no stable shape to align to yet.
+2. **Moving target.** The user flagged (2026-05-20) an imminent
+   folder-structure / job-flow rewrite (§12 highest-risk #1). Issue #36
+   explicitly warns against aligning to a moving target.
+3. **Energy loss.** Adopting the runtime shape verbatim would *drop*
+   `scf_energy` from the on-disk JSON — a regression for v1's curated
+   minimal-result contract.
+4. **By design.** v1 is intentionally self-contained and does not track
+   gem-stack changes; `jm-recipe/1` is job-manager's own curated envelope,
+   not a claim of runtime parity.
+
+**Re-evaluation trigger.** Revisit alignment only when *all three* hold:
+(a) B-α migration lands and `parse-results` runs again, (b) the
+PathResolver folder rewrite settles (§12 #1 cleared), and (c) the runtime
+serializer is extended to emit the final energy in JSON (or a documented
+mapping from `raw` is published). Until then, the v1 `# REPLACE_ME` hint
+in `parse.py.tmpl` records this divergence and points here.
