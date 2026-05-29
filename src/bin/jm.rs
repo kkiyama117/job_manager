@@ -493,24 +493,9 @@ async fn cmd_new(
             )));
         }
     } else {
-        // R3' invariant: the JOB_DIR baked into run.py MUST be absolute,
-        // else it is re-resolved against SLURM's nondeterministic cwd at
-        // runtime — exactly the failure R3' eliminates. `--root` is
-        // canonicalized upstream so this never errs in practice; on the
-        // off chance it does, FAIL FAST (no silent relative fallback).
-        // No symlink resolution: keeps login<->compute mounts stable
-        // (spec §5.1). std::path::absolute is stable on the pinned
-        // nightly/edition-2024 toolchain.
-        let flow_dir_abs = match std::path::absolute(&flow_dir) {
-            Ok(p) => p,
-            Err(e) => {
-                rollback();
-                return Err(anyhow::Error::new(e).context(format!(
-                    "R3': failed to absolutize flow dir {}",
-                    flow_dir.display()
-                )));
-            }
-        };
+        // v2 R4: the scaffold bakes no absolute path. JM_JOB_DIR is exported by
+        // batch.bash at render time, so cmd_new no longer needs to absolutize
+        // the flow dir for `assemble` (paths resolve from the env at job runtime).
         let flow_recipe = match job_manager::recipes::find_flow(recipe_name) {
             Ok(r) => r,
             Err(e) => {
@@ -531,7 +516,6 @@ async fn cmd_new(
             &tag_map,
             &uuid,
             &created_at,
-            &flow_dir_abs, // R3': absolute -> baked JOB_DIR is cwd-independent
         ) {
             Ok(a) => a,
             Err(e) => {

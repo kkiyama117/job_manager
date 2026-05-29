@@ -80,7 +80,6 @@ pub fn assemble(
     tags: &BTreeMap<String, String>,
     uuid: &uuid::Uuid,
     created_at: &str,
-    abs_flow_dir: &std::path::Path,
 ) -> Result<Assembled, RecipeError> {
     // 1. wiring -> consumer JobId -> (input名 -> 相対パス)。
     let mut inputs_by_job: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
@@ -134,7 +133,6 @@ pub fn assemble(
             inputs,
             uuid,
             created_at,
-            flow_dir_abs: abs_flow_dir,
         };
         let art = tmpl.instantiate(&ctx)?;
         sidecars.extend(art.sidecars);
@@ -207,15 +205,7 @@ mod tests {
         let mut tags = BTreeMap::new();
         tags.insert("compound".to_string(), "REPLACE_ME-INCHIKEY".to_string());
         let uuid = uuid::Uuid::now_v7();
-        assemble(
-            &G16OptParse,
-            &raw,
-            &tags,
-            &uuid,
-            "2026-05-18T00:00:00Z",
-            std::path::Path::new("/work/root/01999999-0000-7000-8000-0000000000ab"),
-        )
-        .unwrap()
+        assemble(&G16OptParse, &raw, &tags, &uuid, "2026-05-18T00:00:00Z").unwrap()
     }
 
     #[test]
@@ -282,20 +272,21 @@ mod tests {
     }
 
     #[test]
-    fn r3prime_no_cd_in_body_and_run_py_has_absolute_job_dir() {
+    fn r4_no_cd_in_body_and_no_absolute_path_baked() {
         let a = assemble_default();
         assert!(
             !a.flow_toml.contains("cd "),
-            "R3': flow.toml body must not cd; got:\n{}",
+            "R4: flow.toml body must not cd; got:\n{}",
             a.flow_toml
         );
-        // R3' (a): absolute launcher path, never the relative form (H1 fix).
-        assert!(a.flow_toml.contains(
-            "bash \"/work/root/01999999-0000-7000-8000-0000000000ab/opt/scripts/opt.bash\""
-        ));
+        // R4: env-var launcher, no absolute flow_dir path baked anywhere.
         assert!(
-            !a.flow_toml.contains("bash scripts/opt.bash"),
-            "H1 regression: flow.toml must not use a relative launcher; got:\n{}",
+            a.flow_toml
+                .contains("bash \"$JM_JOB_DIR/scripts/opt.bash\"")
+        );
+        assert!(
+            !a.flow_toml.contains("/work/root/"),
+            "R4: flow.toml must not bake an absolute flow_dir path; got:\n{}",
             a.flow_toml
         );
         let runpy = a
@@ -306,12 +297,26 @@ mod tests {
         assert!(
             runpy
                 .contents
-                .contains("JOB_DIR = \"/work/root/01999999-0000-7000-8000-0000000000ab/opt\"")
+                .contains("JOB_DIR = os.environ[\"JM_JOB_DIR\"]")
+        );
+        assert!(
+            !runpy.contents.contains("/work/root/"),
+            "R4: run.py must not bake an absolute flow_dir path"
         );
         assert!(
             !runpy.contents.contains("os.getcwd()"),
-            "R3': cwd-independent"
+            "R4: cwd-independent"
         );
+
+        // R4 invariant: NO sidecar / flow.toml / plan.toml bakes the abs flow_dir.
+        for f in &a.sidecars {
+            assert!(
+                !f.contents.contains("/work/root/"),
+                "R4 invariant: sidecar {:?} leaked an absolute flow_dir path",
+                f.relpath
+            );
+        }
+        assert!(!a.plan_toml.contains("/work/root/"));
     }
 
     #[test]
@@ -325,7 +330,6 @@ mod tests {
             &BTreeMap::new(),
             &uuid,
             "2026-05-18T00:00:00Z",
-            std::path::Path::new("/r/u"),
         )
         .unwrap_err();
         assert!(matches!(err, RecipeError::UnknownParam { .. }));

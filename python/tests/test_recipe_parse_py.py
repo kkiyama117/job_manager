@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -13,24 +14,22 @@ FIX = Path(__file__).resolve().parent / "_recipe_fixtures" / "g16_ok.out"
 def _materialize(tmp: Path, input_rel: str) -> Path:
     job = tmp / "parse"
     (job / "scripts").mkdir(parents=True)
-    # R3': bake absolute JOB_DIR (mirrors scaffold). An absolute input_rel
-    # (e.g. the fixture) wins over JOB_DIR via os.path.join semantics.
-    body = (
-        PARSE_TMPL.read_text()
-        .replace("{{JOB_DIR}}", str(job))
-        .replace("{{INPUT_REL}}", input_rel)
-    )
+    # v2 R4: parse.py reads JOB_DIR from $JM_JOB_DIR (no scaffold-baked path);
+    # only the relative wiring path (INPUT_REL) is swapped at scaffold time. An
+    # absolute input_rel (e.g. the fixture) wins via os.path.join semantics.
+    body = PARSE_TMPL.read_text().replace("{{INPUT_REL}}", input_rel)
     (job / "scripts" / "parse.py").write_text(body)
     return job
 
 
 def _run(job: Path) -> subprocess.CompletedProcess:
-    # R3' (a) / H1 regression: launch parse.py by an ABSOLUTE path from a cwd
-    # that is NOT the job dir, proving parse.py is cwd-independent (the
-    # previous `cwd=job` masked the launcher gap).
+    # v2 R4: launch parse.py by an ABSOLUTE path from a cwd that is NOT the job
+    # dir, with JM_JOB_DIR exported (as batch.bash would at render time). This
+    # proves parse.py is cwd-independent and resolves JOB_DIR from the env.
     return subprocess.run(
         [sys.executable, str(job / "scripts" / "parse.py")],
         cwd=job.parent,
+        env={**os.environ, "JM_JOB_DIR": str(job)},
         capture_output=True,
         text=True,
     )

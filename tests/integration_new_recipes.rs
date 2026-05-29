@@ -70,19 +70,19 @@ fn scaffold_g16_opt_parse_writes_all_files() {
 
     let flow = fs::read_to_string(dir.join("flow.toml")).unwrap();
     assert!(flow.contains("[jobs.opt]") && flow.contains("[jobs.parse]"));
-    // R3': flow.toml body has NO cd; absolute job dir is baked into run.py.
+    // R4: flow.toml body has NO cd; launches via the $JM_JOB_DIR env var.
     assert!(
         !flow.contains("cd "),
-        "R3': flow.toml must not cd; got:\n{flow}"
+        "R4: flow.toml must not cd; got:\n{flow}"
     );
-    // R3' (a): absolute launcher path, never the relative form (H1 fix).
+    // R4: env-var launcher, no absolute flow_dir path baked.
     assert!(
-        flow.contains(&format!("bash \"{}/opt/scripts/opt.bash\"", dir.display())),
-        "flow.toml body must use absolute launcher; got:\n{flow}"
+        flow.contains("bash \"$JM_JOB_DIR/scripts/opt.bash\""),
+        "flow.toml body must use the $JM_JOB_DIR launcher; got:\n{flow}"
     );
     assert!(
-        !flow.contains("bash scripts/opt.bash"),
-        "H1 regression: flow.toml must not use a relative launcher; got:\n{flow}"
+        !flow.contains(&dir.display().to_string()),
+        "R4: flow.toml must not bake the absolute flow_dir path; got:\n{flow}"
     );
 
     let gjf = fs::read_to_string(dir.join("opt/input/main.gjf")).unwrap();
@@ -92,24 +92,28 @@ fn scaffold_g16_opt_parse_writes_all_files() {
     let optbash = fs::read_to_string(dir.join("opt/scripts/opt.bash")).unwrap();
     assert!(optbash.contains("unset -f conda"));
     assert!(optbash.contains("module restore gaussian_A -f"));
-    assert!(optbash.contains(&format!("python \"{}/opt/scripts/run.py\"", dir.display())));
+    assert!(optbash.contains("python \"$JM_JOB_DIR/scripts/run.py\""));
     assert!(
-        !optbash.contains("python scripts/run.py"),
-        "H1 regression: opt.bash must launch run.py by absolute path"
+        !optbash.contains(&dir.display().to_string()),
+        "R4: opt.bash must not bake an absolute path"
     );
     assert!(!optbash.contains("srun"));
 
     assert!(dir.join("opt/scripts/run.py").exists());
     assert!(dir.join("parse/scripts/parse.py").exists());
 
-    // R3': the absolute job dir is baked into run.py/parse.py, sentinel
-    // swapped, and os.getcwd() never used (cwd-independent like run-g16).
+    // R4: JOB_DIR read from env, no {{JOB_DIR}} sentinel, no absolute path
+    // baked, os.getcwd() never used (cwd-independent like run-g16).
     let runpy = fs::read_to_string(dir.join("opt/scripts/run.py")).unwrap();
-    assert!(runpy.contains(&format!("JOB_DIR = \"{}/opt\"", dir.display())));
+    assert!(runpy.contains("JOB_DIR = os.environ[\"JM_JOB_DIR\"]"));
     assert!(!runpy.contains("{{JOB_DIR}}"));
     assert!(!runpy.contains("os.getcwd()"));
+    assert!(
+        !runpy.contains(&dir.display().to_string()),
+        "R4: run.py must not bake the absolute flow_dir path"
+    );
     let parsepy = fs::read_to_string(dir.join("parse/scripts/parse.py")).unwrap();
-    assert!(parsepy.contains(&format!("JOB_DIR = \"{}/parse\"", dir.display())));
+    assert!(parsepy.contains("JOB_DIR = os.environ[\"JM_JOB_DIR\"]"));
     assert!(!parsepy.contains("{{JOB_DIR}}"));
 
     #[cfg(unix)]
@@ -121,9 +125,10 @@ fn scaffold_g16_opt_parse_writes_all_files() {
 }
 
 #[test]
-fn r3prime_job_dir_is_absolute_even_with_relative_root() {
-    // R3' invariant regression: a relative `--root` must still bake an
-    // ABSOLUTE JOB_DIR (otherwise it re-resolves against SLURM's cwd).
+fn r4_scaffold_bakes_no_absolute_flow_dir_path() {
+    // R4 invariant (spec §9): regardless of whether `--root` is relative or
+    // absolute, the scaffold output must contain NO absolute flow_dir path —
+    // paths resolve from $JM_JOB_DIR (exported by batch.bash) at job runtime.
     let root = tempfile::tempdir().unwrap();
     let mut c = jm();
     c.current_dir(root.path()) // cwd = tempdir; pass `--root .` (relative)
@@ -135,30 +140,35 @@ fn r3prime_job_dir_is_absolute_even_with_relative_root() {
     let printed = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     let dir = PathBuf::from(printed.trim());
 
-    let runpy_path = if dir.is_absolute() {
-        dir.join("opt/scripts/run.py")
+    let abs_dir = if dir.is_absolute() {
+        dir.clone()
     } else {
-        root.path().join(&dir).join("opt/scripts/run.py")
+        root.path().join(&dir)
     };
-    let runpy = fs::read_to_string(&runpy_path).unwrap();
-    // The JOB_DIR literal must start with the absolute tempdir prefix and
-    // must not be the relative "./..." form.
-    let job_dir_line = runpy
-        .lines()
-        .find(|l| l.starts_with("JOB_DIR = "))
-        .expect("run.py must define JOB_DIR");
-    let baked = job_dir_line
-        .trim_start_matches("JOB_DIR = \"")
-        .trim_end_matches('"');
-    assert!(
-        Path::new(baked).is_absolute(),
-        "R3': baked JOB_DIR must be absolute, got {baked:?}"
-    );
-    assert!(baked.ends_with("/opt"), "got {baked:?}");
-    assert!(
-        !baked.starts_with("./") && !baked.starts_with("."),
-        "got {baked:?}"
-    );
+    let abs_prefix = root.path().display().to_string();
+
+    // run.py / parse.py read JOB_DIR from the environment, never bake an abs path.
+    let runpy = fs::read_to_string(abs_dir.join("opt/scripts/run.py")).unwrap();
+    assert!(runpy.contains("JOB_DIR = os.environ[\"JM_JOB_DIR\"]"));
+    let parsepy = fs::read_to_string(abs_dir.join("parse/scripts/parse.py")).unwrap();
+    assert!(parsepy.contains("JOB_DIR = os.environ[\"JM_JOB_DIR\"]"));
+
+    // No scaffold-authored file (flow.toml / plan.toml / scripts) may contain
+    // the absolute tempdir prefix.
+    for rel in [
+        "flow.toml",
+        "plan.toml",
+        "opt/scripts/opt.bash",
+        "opt/scripts/run.py",
+        "parse/scripts/parse.bash",
+        "parse/scripts/parse.py",
+    ] {
+        let body = fs::read_to_string(abs_dir.join(rel)).unwrap();
+        assert!(
+            !body.contains(&abs_prefix),
+            "R4 invariant: {rel} leaked the absolute flow_dir prefix {abs_prefix:?}"
+        );
+    }
 }
 
 #[test]

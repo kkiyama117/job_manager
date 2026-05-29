@@ -15,11 +15,9 @@ def _materialize(tmp: Path) -> Path:
     )
     scripts = job / "scripts"
     scripts.mkdir()
-    # R3': scaffold bakes the absolute job dir; the smoke harness does the
-    # same {{JOB_DIR}} swap-in here so run.py is cwd-independent under test.
-    (scripts / "run.py").write_text(
-        RUN_TMPL.read_text().replace("{{JOB_DIR}}", str(job))
-    )
+    # v2 R4: run.py reads JOB_DIR from $JM_JOB_DIR (no scaffold-baked path),
+    # so the template is written verbatim; base_env() exports JM_JOB_DIR.
+    (scripts / "run.py").write_text(RUN_TMPL.read_text())
     return job
 
 
@@ -49,6 +47,9 @@ def base_env(tmp: Path) -> dict:
     e["PATH"] = f"{tmp / 'bin'}:{e['PATH']}"
     e["JM_FLOW_UUID"] = "flowu"
     e["JM_JOB_ID"] = "opt"
+    # v2 R4: run.py resolves JOB_DIR from JM_JOB_DIR (exported by batch.bash
+    # at render time). _materialize() puts the job at tmp/job.
+    e["JM_JOB_DIR"] = str(tmp / "job")
     e["JM_PARAM_SCRATCH_ROOT"] = str(tmp / "scratch")
     e["JM_PARAM_LAUNCHER"] = ""
     e["JM_PARAM_G16_CMD"] = "g16"
